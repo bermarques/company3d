@@ -13,6 +13,31 @@ export const cliClient = {
 };
 
 const API = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
+
+// GraphQL field -> the GitHub App permission that unlocks it
+const FIELD_PERMISSION = {
+  issues: 'Issues',
+  pullRequests: 'Pull requests',
+  openPRs: 'Pull requests',
+  mergedPRs: 'Pull requests',
+  latestReviews: 'Pull requests',
+  approvals: 'Pull requests',
+  closingIssuesReferences: 'Pull requests',
+  membersWithRole: 'Members (organization permission)',
+  statusCheckRollup: 'Commit statuses and Checks',
+  defaultBranchRef: 'Contents',
+  history: 'Contents',
+};
+
+function missingPermissionMessage(path = []) {
+  const field = [...path].reverse().find((p) => typeof p === 'string' && FIELD_PERMISSION[p]);
+  const perm = field ? `the "${FIELD_PERMISSION[field]}"` : 'a required';
+  return (
+    `The Company3D GitHub App is missing ${perm} permission here. In the app's settings on GitHub (Permissions & events), ` +
+    `add it with the access listed in the README, then have an organization owner accept the update under ` +
+    `the organization's Settings → GitHub Apps.`
+  );
+}
 const ENDPOINT_RE = /^[A-Za-z0-9/_.\-?=&%,]+$/;
 
 /**
@@ -63,7 +88,13 @@ export function createTokenClient(getToken) {
     rest: request,
     async graphql(query, variables = {}) {
       const res = await request('graphql', { method: 'POST', body: { query, variables } });
-      if (res && res.errors && !res.data) throw new GhError(res.errors.map((e) => e.message).join('; '), { status: 502 });
+      if (res && res.errors) {
+        // A GitHub App without a needed permission gets partial "FORBIDDEN" errors, and GitHub nulls out the
+        // whole repository entry. Say so instead of quietly showing an empty building.
+        const denied = res.errors.find((e) => e.type === 'FORBIDDEN' || /not accessible by integration/i.test(e.message || ''));
+        if (denied) throw new GhError(missingPermissionMessage(denied.path), { status: 403 });
+        if (!res.data) throw new GhError(res.errors.map((e) => e.message).join('; '), { status: 502 });
+      }
       return res ? res.data : null;
     },
   };
