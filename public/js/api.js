@@ -1,0 +1,39 @@
+// Fetch wrappers for the local Company3D server.
+async function req(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Company3D': '1' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+const enc = encodeURIComponent;
+
+export const api = {
+  status: () => req('GET', '/api/status'),
+  recheck: () => req('POST', '/api/recheck', {}),
+  owners: () => req('GET', '/api/owners'),
+  connect: (owner) => req('POST', '/api/connect', { owner }),
+  useDemo: () => req('POST', '/api/connect', { demo: true }),
+  world: (fresh = false) => req('GET', `/api/world${fresh ? '?fresh=1' : ''}`),
+  floor: (repo, fresh = false) => req('GET', `/api/floor/${enc(repo)}${fresh ? '?fresh=1' : ''}`),
+  labels: (repo) => req('GET', `/api/labels/${enc(repo)}`),
+  saveSettings: (patch) => req('PUT', '/api/settings', patch),
+  createRepo: (payload) => req('POST', '/api/repos', payload),
+  createIssue: (repo, payload) => req('POST', `/api/issues/${enc(repo)}`, payload),
+  updateIssue: (repo, number, patch) => req('PATCH', `/api/issues/${enc(repo)}/${number}`, patch),
+  mergePR: (repo, number, method = 'squash') => req('POST', `/api/prs/${enc(repo)}/${number}/merge`, { method }),
+  avatarUrl: (login) => `/api/avatar/${enc(login)}`,
+};
