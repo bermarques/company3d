@@ -52,14 +52,25 @@ Then generate a **client secret** and **install the app** on your organization.
 
 ### 2. Configure and run
 
-```bash
-cp .env.example .env       # then fill in PUBLIC_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (and GITHUB_APP_SLUG)
-npm ci --omit=dev
-npm start
-```
+Hosted mode needs `PUBLIC_URL`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and a random `SESSION_SECRET`
+(see [.env.example](.env.example)). On a platform, set them as environment variables in its dashboard. A `.env` file is
+only for running on your own machine and is never committed.
 
-Put it behind HTTPS: a reverse proxy like Caddy or nginx, or a platform such as Fly.io, Render or Railway. Set
-`TRUST_PROXY=1` when a proxy sits in front. Sessions live in memory, so run a single instance.
+**Vercel**
+1. Import the GitHub repo. Vercel detects `server.js`, runs `npm run build`, serves `public/` from its CDN and runs the
+   server as a function.
+2. Add the environment variables above, plus `TRUST_PROXY=1`. `PUBLIC_URL` must be the exact address people use (your
+   production domain, or a branch address like `https://<project>-git-develop-<team>.vercel.app`).
+3. Optional but recommended: add **Upstash for Redis** from Vercel's Marketplace (it has a free tier) so floor order and
+   repo connections are kept. Without it they reset now and then.
+4. Preview deployments are behind Vercel's login by default. Turn that off under *Settings → Deployment Protection*
+   if teammates should reach a preview address.
+5. Vercel's free Hobby plan is for non-commercial use. Use Pro (or another host) once you charge customers.
+
+**Railway, Render, Fly.io or your own server**: `npm ci --omit=dev && npm run build && npm start` behind HTTPS, with
+`TRUST_PROXY=1` when a proxy is in front. Mount a volume and point `DATA_DIR` at it (or use Redis) to keep settings.
+
+Sign-ins live in encrypted cookies, so they survive restarts and deploys and work with any number of instances.
 
 ### 3. Share the building
 
@@ -127,11 +138,13 @@ server.js                  HTTP server: static files, JSON API, mode selection (
 server/github-client.js    GitHub access: local `gh` CLI, or a signed-in user's token (hosted)
 server/github-provider.js  org/repo/member queries, permissions and mutations
 server/auth.js             "Sign in with GitHub" (OAuth web flow + PKCE, refresh, revoke)
-server/sessions.js         server-side sessions and cookies
+server/sessions.js         sign-in sessions sealed in encrypted cookies
 server/security.js         CSP and security headers, rate limits
 server/demo-provider.js    fictional company with in-memory mutations
 server/compose.js          turns issues/PRs/contributors/members into the floor model
-server/config.js           per-org building settings (data/config.json)
+server/config.js           per-org building settings (Upstash Redis or a JSON file)
+scripts/build.mjs          copies three.js into public/ for CDNs; checks vercel.json CSP
+vercel.json                Vercel routes and security headers
 public/js/main.js          renderer, game loop, floors, elevator rides, polling, actions
 public/js/permissions.js   which buttons the viewer gets, from their GitHub permissions
 public/js/world/*          building, furniture, characters, repo floor, lobby, canvas screens

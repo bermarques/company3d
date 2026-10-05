@@ -575,7 +575,8 @@ async function boot() {
       status = await api.status().catch(() => status);
     }
   }
-  if (status.hosted && status.mode === 'github' && status.owner && !linkOrg) history.replaceState(null, '', `/o/${encodeURIComponent(status.owner)}`);
+  // keep a clean, shareable /o/<org> address (also tidies the /index.html?o=<org> fallback some hosts use)
+  if (status.hosted && status.mode === 'github' && status.owner) history.replaceState(null, '', `/o/${encodeURIComponent(status.owner)}`);
   if (status.hosted && status.mode === 'demo' && linkOrg) history.replaceState(null, '', '/');
   if (status.hosted && status.user) {
     pauseEl.querySelector('.pause-card').append(h('button', { class: 'btn ghost', 'data-action': 'signout' }, `Sign out @${status.user.login}`));

@@ -20,7 +20,7 @@ const { detectGh } = await import('./server/gh.js');
 const { cliClient, createTokenClient, GhError } = await import('./server/github-client.js');
 const { createGithubProvider, fetchAvatar } = await import('./server/github-provider.js');
 const { createDemoProvider } = await import('./server/demo-provider.js');
-const { getConfig, setConnection, fileSettingsStore, memorySettingsStore } = await import('./server/config.js');
+const { getConfig, setConnection, settingsStore, memorySettingsStore, SETTINGS_BACKEND } = await import('./server/config.js');
 const { createSessionStore } = await import('./server/sessions.js');
 const { createAuth } = await import('./server/auth.js');
 const { rateLimiter, clientIp, inlineScriptHashes, contentSecurityPolicy, baseSecurityHeaders } = await import('./server/security.js');
@@ -61,7 +61,15 @@ const ALLOWED_ORGS = (env.ALLOWED_ORGS || '')
 const ORIGIN = HOSTED ? PUBLIC_URL.origin : null;
 const ALLOWED_HOSTS = new Set(HOSTED ? [PUBLIC_URL.host] : [`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 
-const sessions = HOSTED ? createSessionStore({ secure: SECURE }) : null;
+// Sessions are sealed into cookies with this key. Changing it signs everyone out.
+const SESSION_SECRET = env.SESSION_SECRET || '';
+if (HOSTED && SESSION_SECRET.length < 32) {
+  console.error('\n  Hosted mode needs SESSION_SECRET (at least 32 random characters). Generate one with:');
+  console.error('    node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"\n');
+  process.exit(1);
+}
+
+const sessions = HOSTED ? createSessionStore({ secure: SECURE, secret: SESSION_SECRET }) : null;
 const auth = HOSTED
   ? createAuth({
       publicUrl: ORIGIN,
@@ -110,7 +118,15 @@ class HttpError extends Error {
 }
 
 const securityHeaders = baseSecurityHeaders({ https: SECURE });
-const CSP = contentSecurityPolicy(inlineScriptHashes(INDEX));
+let indexPage = null; // { html, csp }, loaded on first use
+
+function loadIndex() {
+  if (!indexPage) {
+    const html = fs.readFileSync(INDEX);
+    indexPage = { html, csp: contentSecurityPolicy(inlineScriptHashes(INDEX)) };
+  }
+  return indexPage;
+}
 
 function send(res, status, body, headers = {}) {
   const isJson = typeof body === 'object' && !Buffer.isBuffer(body);
@@ -159,6 +175,19 @@ const orgAllowed = (owner) => !ALLOWED_ORGS.length || ALLOWED_ORGS.includes(owne
  * Everything a request needs: who is asking (provider acting as them), which building, and where its
  * settings live. Cache keys are namespaced per viewer so one person's private data never reaches another.
  */
+// Hosted demo sandboxes, one per visitor. Kept in this process only; on serverless hosts a visitor may
+// occasionally land on a fresh copy of the demo, which is fine for a demo.
+const demoSandboxes = new Map();
+function demoSandbox(id) {
+  let box = demoSandboxes.get(id);
+  if (!box) {
+    if (demoSandboxes.size >= 500) demoSandboxes.delete(demoSandboxes.keys().next().value);
+    box = { provider: createDemoProvider(), settings: memorySettingsStore() };
+    demoSandboxes.set(id, box);
+  }
+  return box;
+}
+
 function contextFor(req) {
   if (!HOSTED) {
     const owner = localProvider.mode === 'demo' ? 'demo-co' : getConfig().owner;
@@ -168,18 +197,24 @@ function contextFor(req) {
       ns: localProvider.mode,
       owner,
       viewer: localProvider.viewer,
-      settings: owner ? fileSettingsStore(owner) : null,
+      settings: owner ? settingsStore(owner) : null,
     };
   }
   const s = sessions.get(req);
   if (!s) return { session: null, provider: null };
   if (s.kind === 'demo') {
-    s.provider = s.provider || createDemoProvider();
-    s.demoSettings = s.demoSettings || memorySettingsStore();
-    return { session: s, provider: s.provider, ns: `d:${s.id}`, owner: 'demo-co', viewer: s.provider.viewer, settings: s.demoSettings };
+    const box = demoSandbox(s.id);
+    return { session: s, provider: box.provider, ns: `d:${s.id}`, owner: 'demo-co', viewer: box.provider.viewer, settings: box.settings };
   }
-  s.provider = s.provider || createGithubProvider({ client: createTokenClient(() => auth.validToken(s)), viewer: s.user });
-  return { session: s, provider: s.provider, ns: `u:${s.user.id}`, owner: s.org, viewer: s.user, settings: s.org ? fileSettingsStore(s.org) : null };
+  const provider = createGithubProvider({ client: createTokenClient(() => auth.validToken(s)), viewer: s.user });
+  return { session: s, provider, ns: `u:${s.user.id}`, owner: s.org, viewer: s.user, settings: s.org ? settingsStore(s.org) : null };
+}
+
+/** Sessions live in a sealed cookie: re-send it whenever this request changed the session. */
+function commitSession(res, ctx) {
+  if (!HOSTED || !ctx.session || !ctx.session.dirty) return;
+  const prev = res.getHeader('Set-Cookie');
+  res.setHeader('Set-Cookie', [...(prev ? [].concat(prev) : []), sessions.setCookie(ctx.session)]);
 }
 
 function requireSession(ctx) {
@@ -199,7 +234,10 @@ async function requireOrg(ctx) {
   if (!ctx.owner) throw new HttpError(409, 'No GitHub organization selected yet', { noOrg: true });
   const access = await accessFor(ctx, ctx.owner);
   if (access.role === 'none') {
-    if (ctx.session) ctx.session.org = null;
+    if (ctx.session) {
+      ctx.session.org = null;
+      ctx.session.dirty = true;
+    }
     throw new HttpError(403, `You're not a member of ${ctx.owner} on GitHub`, { noOrg: true });
   }
   return access;
@@ -209,8 +247,8 @@ async function getWorld(ctx, fresh = false) {
   return cached(`${ctx.ns}:${ctx.owner}:world`, 120_000, () => ctx.provider.getWorld(ctx.owner), fresh);
 }
 
-function floorsFor(ctx, world) {
-  const settings = ctx.settings.get();
+async function floorsFor(ctx, world) {
+  const settings = await ctx.settings.get();
   const names = new Set(world.repos.map((r) => r.name));
   if (settings.floors) return settings.floors.filter((n) => names.has(n));
   return world.repos.filter((r) => !r.isArchived).slice(0, DEFAULT_FLOOR_COUNT).map((r) => r.name);
@@ -269,10 +307,7 @@ route(
   async ({ ctx, res, ip }) => {
     if (ctx.session && ctx.session.kind === 'user') throw new HttpError(409, "You're signed in — sign out to try the demo");
     if (!demoLimiter(ip)) throw new HttpError(429, 'Too many demo sessions from this network, try again later');
-    if (!ctx.session) {
-      const s = sessions.create({ kind: 'demo' });
-      res.setHeader('Set-Cookie', sessions.setCookie(s));
-    }
+    if (!ctx.session) ctx.session = sessions.create({ kind: 'demo' });
     return { ok: true };
   },
   { local: false },
@@ -303,7 +338,8 @@ route('POST', '/api/connect', async ({ ctx, body }) => {
   const access = await accessFor(ctx, owner, true);
   if (access.role === 'none') throw new HttpError(403, `You're not a member of ${owner} on GitHub`);
   ctx.session.org = owner;
-  return statusPayload(contextFor(ctx.req));
+  ctx.session.dirty = true;
+  return statusPayload({ ...ctx, owner });
 });
 
 route('GET', '/api/world', async ({ ctx, query }) => {
@@ -317,8 +353,8 @@ route('GET', '/api/world', async ({ ctx, query }) => {
     repos: world.repos,
     memberCount: world.members ? world.members.length : null,
     members: world.members ? world.members.map((m) => ({ login: m.login, name: m.name })) : null,
-    floors: floorsFor(ctx, world),
-    links: ctx.settings.get().links,
+    floors: await floorsFor(ctx, world),
+    links: (await ctx.settings.get()).links,
   };
 });
 
@@ -353,9 +389,9 @@ route('PUT', '/api/settings', async ({ ctx, body }) => {
       kind: String((l && l.kind) || 'depends on').slice(0, 40),
     }));
   }
-  const settings = ctx.settings.update(patch);
+  const settings = await ctx.settings.update(patch);
   invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return { floors: floorsFor(ctx, world), links: settings.links };
+  return { floors: await floorsFor(ctx, world), links: settings.links };
 });
 
 route('POST', '/api/repos', async ({ ctx, body }) => {
@@ -371,8 +407,8 @@ route('POST', '/api/repos', async ({ ctx, body }) => {
   });
   // Give the new project a floor right away (if this person may change the layout).
   if (access.canManage) {
-    const floors = floorsFor(ctx, world);
-    ctx.settings.update({ floors: [...floors.filter((f) => f !== created.name), created.name] });
+    const floors = await floorsFor(ctx, world);
+    await ctx.settings.update({ floors: [...floors.filter((f) => f !== created.name), created.name] });
   }
   invalidate(`${ctx.ns}:${ctx.owner}:world`);
   return created;
@@ -466,7 +502,17 @@ function serveStatic(res, baseDir, relPath, extraHeaders = {}) {
   });
 }
 
-const serveIndex = (res) => serveStatic(res, PUBLIC, 'index.html', { 'Content-Security-Policy': CSP });
+function serveIndex(res, org) {
+  let page;
+  try {
+    page = loadIndex();
+  } catch {
+    // e.g. on Vercel, where public/ is served by the CDN and isn't bundled with the server function
+    return send(res, 302, '', { Location: org ? `/index.html?o=${encodeURIComponent(org)}` : '/index.html' });
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': page.csp });
+  res.end(page.html);
+}
 
 // ---------------------------------------------------------------- server
 const apiLimiter = rateLimiter({ capacity: 120, perMinute: 240 });
@@ -477,8 +523,9 @@ const demoLimiter = rateLimiter({ capacity: 5, perMinute: 2 });
 async function handle(req, res) {
   for (const [k, v] of Object.entries(securityHeaders)) res.setHeader(k, v);
 
+  if (req.url === '/healthz') return send(res, 200, 'ok');
   // DNS-rebinding / host-header protection: only answer for our own host name.
-  if (!ALLOWED_HOSTS.has(req.headers.host)) return send(res, 421, 'unknown host');
+  if (!hostAllowed(req)) return send(res, 421, 'unknown host');
   const url = new URL(req.url, 'http://placeholder');
   let pathname;
   try {
@@ -488,8 +535,6 @@ async function handle(req, res) {
   }
   if (pathname.includes('\0')) return send(res, 400, 'bad url');
   const ip = clientIp(req, TRUST_PROXY);
-
-  if (pathname === '/healthz') return send(res, 200, 'ok');
 
   // ---- sign-in (hosted only)
   if (pathname.startsWith('/auth/')) {
@@ -529,6 +574,7 @@ async function handle(req, res) {
       try {
         const body = write ? await readBody(req) : {};
         const result = await r.handler({ ctx, params, query: url.searchParams, body, res, ip });
+        commitSession(res, ctx);
         return send(res, 200, result ?? { ok: true });
       } catch (e) {
         return sendError(res, ctx, req, pathname, e);
@@ -546,8 +592,15 @@ async function handle(req, res) {
     return serveStatic(res, THREE_DIR, rel);
   }
   // building links like /o/my-org load the app, which opens that org
-  if (pathname === '/' || pathname === '/index.html' || /^\/o\/[A-Za-z0-9-]{1,39}\/?$/.test(pathname)) return serveIndex(res);
+  const orgPage = pathname.match(/^\/o\/([A-Za-z0-9-]{1,39})\/?$/);
+  if (pathname === '/' || pathname === '/index.html' || orgPage) return serveIndex(res, orgPage && orgPage[1]);
   return serveStatic(res, PUBLIC, pathname);
+}
+
+function hostAllowed(req) {
+  if (ALLOWED_HOSTS.has(req.headers.host)) return true;
+  // behind a trusted proxy the public host name may only be in X-Forwarded-Host
+  return TRUST_PROXY && ALLOWED_HOSTS.has(String(req.headers['x-forwarded-host'] || '').split(',')[0].trim());
 }
 
 function sameOrigin(req) {
@@ -562,9 +615,9 @@ function sendError(res, ctx, req, pathname, e) {
   let status = e.status && e.status >= 400 && e.status < 600 ? e.status : 500;
   // GitHub said the token is no good (revoked, expired): end this session cleanly.
   if (HOSTED && status === 401 && ctx.session && ctx.session.kind === 'user') {
-    sessions.destroy(ctx.session);
     return send(res, 401, { error: 'Your GitHub sign-in expired. Please sign in again.', signedOut: true }, { 'Set-Cookie': sessions.clearCookie() });
   }
+  commitSession(res, ctx);
   if (status >= 500) console.error(`[api] ${req.method} ${pathname}: ${e.message}`);
   // Internal details stay in the server log when the app is exposed to other people.
   const message = HOSTED && status >= 500 && !(e instanceof GhError) ? 'Something went wrong on our side' : e.message || 'Something went wrong';
@@ -595,6 +648,8 @@ server.listen(PORT, HOST, () => {
     console.log(`\n  🏢  Company3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
     console.log(`  Sign-in callback URL: ${ORIGIN}/auth/callback`);
     if (ALLOWED_ORGS.length) console.log(`  Restricted to organizations: ${ALLOWED_ORGS.join(', ')}`);
+    console.log(`  Building settings stored in: ${SETTINGS_BACKEND}`);
+    if (SETTINGS_BACKEND === 'temporary file') console.log('  ⚠️  Floor order and repo connections will reset now and then. Add Upstash Redis (KV_REST_API_URL / KV_REST_API_TOKEN) to keep them.');
     if (!SECURE) console.log('  ⚠️  PUBLIC_URL is not https — fine for local testing, never for production.');
     console.log('');
     return;

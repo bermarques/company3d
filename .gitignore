@@ -1,5 +1,8 @@
 node_modules/
 
+# build output (three.js copied for static hosts)
+public/vendor/
+
 # runtime state: connected org, floor order, repo links, sessions
 data/
 

@@ -17,9 +17,11 @@ requires a custom header plus same origin on every write (CSRF protection). Don'
 - Everyone signs in with GitHub (OAuth web flow with `state` bound to the browser and PKCE). Every GitHub call is
   made with that person's own token, so GitHub enforces repository and organization permissions. The server never
   uses the GitHub CLI in this mode.
-- Tokens live only in server memory, are never sent to the browser, are refreshed when they expire (GitHub Apps)
-  and are revoked on sign-out. Sessions are random 256-bit ids in `HttpOnly`, `SameSite=Lax`, `Secure`
-  (`__Host-` prefixed) cookies with idle and absolute expiry.
+- Sessions are sealed with AES-256-GCM (key derived from `SESSION_SECRET`) into an `HttpOnly`, `SameSite=Lax`,
+  `Secure`, `__Host-` prefixed cookie with idle and absolute expiry. The browser holds only ciphertext: page scripts
+  can't read the cookie, and it can't be read or altered without the key. GitHub tokens are refreshed when they
+  expire (GitHub Apps) and revoked on sign-out, which also makes any copied cookie useless. The OAuth `state` and
+  PKCE verifier travel the same way, so no server memory is needed (serverless-friendly).
 - Access to a building requires active membership of that organization, re-checked every few minutes, so people
   who leave lose access. Company3D's own settings (floor layout, repo connections) can only be changed by org owners.
 - Cached GitHub data is namespaced per user, so one person's private data never reaches another.
@@ -28,5 +30,7 @@ requires a custom header plus same origin on every write (CSRF protection). Don'
 - All GitHub content is rendered as text (no `innerHTML`); external links must be `https://`.
 - The unauthenticated demo runs in a private in-memory sandbox per visitor with size limits.
 
-Known limits: sessions are in memory (one instance; everyone signs in again after a restart), and there's no
-audit log yet.
+Keep `SESSION_SECRET` secret and long (32+ random characters). Rotating it signs everyone out.
+
+Known limits: there's no server-side list of sessions, so "sign out everywhere" relies on revoking the GitHub token
+(sign-out does this). There's no audit log yet.

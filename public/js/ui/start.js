@@ -134,7 +134,10 @@ function titleBlock() {
 /** /o/<org> in the address bar: a building link someone shared. */
 export function orgFromPath() {
   const m = location.pathname.match(/^\/o\/([A-Za-z0-9-]{1,39})\/?$/);
-  return m ? m[1] : null;
+  if (m) return m[1];
+  // static hosts may hand the link over as /index.html?o=<org>
+  const q = new URLSearchParams(location.search).get('o');
+  return q && /^[A-Za-z0-9-]{1,39}$/.test(q) ? q : null;
 }
 
 export const buildingLink = (org) => `${location.origin}/o/${encodeURIComponent(org)}`;

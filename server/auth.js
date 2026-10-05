@@ -1,5 +1,6 @@
 // "Sign in with GitHub" for hosted mode (OAuth web flow). Works with a GitHub App (recommended: fine-grained
 // permissions, expiring tokens, installed per organization) or a classic OAuth App.
+// Nothing is kept in server memory between requests, so it also works on serverless hosts.
 import crypto from 'node:crypto';
 import { parseCookies, cookie, randomId } from './sessions.js';
 import { safeEqual } from './security.js';
@@ -13,15 +14,13 @@ export function safeNext(next) {
   return typeof next === 'string' && /^\/(?:o\/[A-Za-z0-9-]{1,39}\/?)?$/.test(next) ? next : '/';
 }
 
+// GitHub App refresh tokens are single-use: concurrent requests in this process share one refresh.
+const refreshing = new Map();
+
 export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions, secure }) {
   const redirectUri = `${publicUrl}/auth/callback`;
   const stateCookie = secure ? '__Host-c3d_oauth' : 'c3d_oauth';
-  const pending = new Map(); // state -> { verifier, next, at }
-
-  setInterval(() => {
-    const now = Date.now();
-    for (const [k, p] of pending) if (now - p.at > PENDING_TTL) pending.delete(k);
-  }, 60_000).unref();
+  const { seal, open } = sessions.sealer;
 
   async function tokenRequest(params) {
     const res = await fetch(`${GITHUB}/login/oauth/access_token`, {
@@ -54,11 +53,9 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
   return {
     /** GET /auth/login?next=/o/org */
     login(req, res, url) {
-      if (pending.size > 10_000) pending.clear(); // flood guard
       const state = randomId(24);
       const verifier = randomId(48);
       const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-      pending.set(state, { verifier, next: safeNext(url.searchParams.get('next')), at: Date.now() });
       const authorize = new URL(`${GITHUB}/login/oauth/authorize`);
       authorize.searchParams.set('client_id', clientId);
       authorize.searchParams.set('redirect_uri', redirectUri);
@@ -67,8 +64,10 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
       authorize.searchParams.set('code_challenge_method', 'S256');
       authorize.searchParams.set('allow_signup', 'false');
       if (scopes) authorize.searchParams.set('scope', scopes); // ignored by GitHub Apps
-      // The state is also pinned to this browser, so a login link can't be replayed in someone else's.
-      redirect(res, authorize.toString(), [cookie(stateCookie, state, { maxAgeSec: PENDING_TTL / 1000, secure })]);
+      // state + PKCE verifier travel sealed in a cookie pinned to this browser, so a login link can't be
+      // replayed in someone else's browser and no server memory is needed.
+      const pending = seal({ state, verifier, next: safeNext(url.searchParams.get('next')), at: Date.now() });
+      redirect(res, authorize.toString(), [cookie(stateCookie, pending, { maxAgeSec: PENDING_TTL / 1000, secure })]);
     },
 
     /** GET /auth/callback?code&state */
@@ -78,10 +77,8 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
       if (url.searchParams.get('error')) return fail('denied');
       const state = url.searchParams.get('state') || '';
       const code = url.searchParams.get('code') || '';
-      const browserState = parseCookies(req.headers.cookie)[stateCookie] || '';
-      const p = pending.get(state);
-      if (!state || !code || !p || !browserState || !safeEqual(state, browserState) || Date.now() - p.at > PENDING_TTL) return fail('expired');
-      pending.delete(state);
+      const p = open(parseCookies(req.headers.cookie)[stateCookie] || '');
+      if (!state || !code || !p || typeof p.state !== 'string' || !safeEqual(state, p.state) || Date.now() - p.at > PENDING_TTL) return fail('expired');
 
       let token;
       let user;
@@ -99,18 +96,17 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
         return fail('github');
       }
 
-      // New session id on every sign-in (no session fixation); drop any previous session in this browser.
-      sessions.destroy(sessions.get(req));
+      // A brand-new session replaces whatever this browser had (no session fixation).
       const s = sessions.create({ kind: 'user', user, token, org: null });
       console.log(`[auth] @${user.login} signed in`);
-      redirect(res, p.next, [sessions.setCookie(s), clear]);
+      redirect(res, safeNext(p.next), [sessions.setCookie(s), clear]);
     },
 
-    /** POST /auth/logout — also revokes the GitHub token so it's useless if it ever leaked. */
+    /** POST /auth/logout: also revokes the GitHub token so the sealed cookie is worthless even if copied. */
     async logout(req, res) {
       const s = sessions.get(req);
       if (s && s.token) {
-        fetch(`${API}/applications/${clientId}/token`, {
+        await fetch(`${API}/applications/${encodeURIComponent(clientId)}/token`, {
           method: 'DELETE',
           headers: {
             Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
@@ -119,15 +115,14 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
             'User-Agent': 'Company3D',
           },
           body: JSON.stringify({ access_token: s.token.access }),
-          signal: AbortSignal.timeout(10_000),
+          signal: AbortSignal.timeout(8_000),
         }).catch(() => {});
       }
-      sessions.destroy(s);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Set-Cookie': sessions.clearCookie() });
       res.end('{"ok":true}');
     },
 
-    /** A usable access token for this session, refreshing GitHub App tokens shortly before they expire. */
+    /** A usable access token, refreshing GitHub App tokens shortly before they expire (marks the session dirty). */
     async validToken(s) {
       const t = s.token;
       if (!t.expiresAt || t.expiresAt - Date.now() > 5 * 60_000) return t.access;
@@ -136,9 +131,15 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
         err.status = 401;
         throw err;
       }
-      // one refresh at a time per session
-      s.refreshing = s.refreshing || tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh }).finally(() => (s.refreshing = null));
-      s.token = await s.refreshing;
+      let job = refreshing.get(t.refresh);
+      if (!job) {
+        job = tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh });
+        refreshing.set(t.refresh, job);
+        // keep the result briefly so requests that still carry the old cookie reuse it
+        job.finally(() => setTimeout(() => refreshing.delete(t.refresh), 60_000).unref()).catch(() => {});
+      }
+      s.token = await job;
+      s.dirty = true;
       return s.token.access;
     },
   };

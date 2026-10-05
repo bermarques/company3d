@@ -6,7 +6,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "demo": "node server.js --demo"
+    "demo": "node server.js --demo",
+    "build": "node scripts/build.mjs"
   },
   "engines": {
     "node": ">=20.12"

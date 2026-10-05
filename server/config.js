@@ -1,10 +1,18 @@
-// Small JSON settings file: which owner (org) is connected in local mode, plus per-org building settings
-// (which repos get floors, in what order, and the repo-to-repo links shown on the maps).
+// Settings storage.
+//  - Local mode: which owner (org) is connected, in data/config.json.
+//  - Per-org building settings (which repos get floors, their order, and repo-to-repo links), in either:
+//      * Upstash Redis (KV_REST_API_URL + KV_REST_API_TOKEN, as set by Vercel's Upstash integration), or
+//      * a JSON file in DATA_DIR (default ./data; /tmp/company3d on Vercel, whose disk is otherwise read-only).
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
+const ON_VERCEL = !!process.env.VERCEL;
+const DATA_DIR = path.resolve(process.env.DATA_DIR || (ON_VERCEL ? '/tmp/company3d' : 'data'));
 const FILE = path.join(DATA_DIR, 'config.json');
+
+const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
+export const SETTINGS_BACKEND = KV_URL && KV_TOKEN ? 'redis' : ON_VERCEL && !process.env.DATA_DIR ? 'temporary file' : 'file';
 
 let config = load();
 
@@ -42,33 +50,62 @@ export function setConnection({ owner, demo }) {
 }
 
 const key = (owner) => owner.toLowerCase();
+const normalize = (s) => ({ floors: s && Array.isArray(s.floors) ? s.floors : null, links: s && Array.isArray(s.links) ? s.links : [] });
 
-/** Per-owner settings: { floors: string[] | null, links: [{from,to,kind}] } */
-export function ownerSettings(owner) {
-  const s = Object.hasOwn(config.owners, key(owner)) ? config.owners[key(owner)] : {};
-  return { floors: Array.isArray(s.floors) ? s.floors : null, links: Array.isArray(s.links) ? s.links : [] };
+// ---------------------------------------------------------------- Upstash Redis (REST, no SDK needed)
+async function redis(command) {
+  const res = await fetch(KV_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(command),
+    signal: AbortSignal.timeout(8_000),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.error) throw new Error(`Settings storage error: ${json.error || res.status}`);
+  return json.result;
 }
 
-export function updateOwnerSettings(owner, patch) {
-  const current = ownerSettings(owner);
-  config.owners[key(owner)] = { ...current, ...patch };
-  save();
-  return ownerSettings(owner);
-}
+const redisKey = (owner) => `company3d:settings:${key(owner)}`;
 
-/** Settings kept in memory only — used for each hosted visitor's private demo sandbox. */
-export function memorySettingsStore() {
-  let s = { floors: null, links: [] };
+/** Per-org building settings, shared by everyone in that org. Async so it can live in Redis. */
+export function settingsStore(owner) {
+  if (SETTINGS_BACKEND === 'redis') {
+    return {
+      async get() {
+        const raw = await redis(['GET', redisKey(owner)]);
+        try {
+          return normalize(raw ? JSON.parse(raw) : null);
+        } catch {
+          return normalize(null);
+        }
+      },
+      async update(patch) {
+        const next = { ...(await this.get()), ...patch };
+        await redis(['SET', redisKey(owner), JSON.stringify(next)]);
+        return normalize(next);
+      },
+    };
+  }
   return {
-    get: () => ({ ...s }),
-    update(patch) {
+    async get() {
+      return normalize(Object.hasOwn(config.owners, key(owner)) ? config.owners[key(owner)] : null);
+    },
+    async update(patch) {
+      config.owners[key(owner)] = { ...(await this.get()), ...patch };
+      save();
+      return normalize(config.owners[key(owner)]);
+    },
+  };
+}
+
+/** Settings kept in memory only, for each hosted visitor's private demo sandbox. */
+export function memorySettingsStore() {
+  let s = normalize(null);
+  return {
+    get: async () => ({ ...s }),
+    async update(patch) {
       s = { ...s, ...patch };
       return { ...s };
     },
   };
 }
-
-export const fileSettingsStore = (owner) => ({
-  get: () => ownerSettings(owner),
-  update: (patch) => updateOwnerSettings(owner, patch),
-});
