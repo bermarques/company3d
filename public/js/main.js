@@ -1,7 +1,7 @@
 // Company3D client entry: renderer, game loop, floor management, elevator rides, live polling and actions.
 import * as THREE from 'three';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
-import { api } from './api.js';
+import { api, setSignedOutHandler } from './api.js';
 import { Player, Interactor } from './engine/player.js';
 import { setAvatarsEnabled, onAvatarsLoaded } from './engine/canvas.js';
 import { RepoFloor } from './world/repoFloor.js';
@@ -12,7 +12,7 @@ import { setModalHooks, isModalOpen } from './ui/modal.js';
 import { setRealAvatars, h } from './ui/dom.js';
 import { openDevPanel, openBoardPanel, openElevatorPanel, openRepoInfo, openRobot } from './ui/panels.js';
 import { openManagerConsole } from './ui/manager.js';
-import { renderStart, hideStart, controlsList } from './ui/start.js';
+import { renderStart, hideStart, controlsList, orgFromPath, signOut } from './ui/start.js';
 import { createPhone } from './ui/phone.js';
 
 // ------------------------------------------------------------------ renderer & scene
@@ -130,8 +130,12 @@ const app = {
   settings,
   activity: [],
   unread: 0,
+  /** The signed-in person (hosted), the gh CLI account (local), or the demo persona. */
   viewerLogin() {
-    return (this.status && this.status.gh.user && !this.isDemo ? this.status.gh.user.login : this.status?.viewer?.login) || 'manager';
+    const s = this.status;
+    if (!s) return 'manager';
+    if (s.hosted) return (s.user && s.user.login) || (s.viewer && s.viewer.login) || 'visitor';
+    return (s.gh && s.gh.user && !this.isDemo ? s.gh.user.login : s.viewer && s.viewer.login) || 'manager';
   },
   applySettings(patch) {
     Object.assign(settings, patch);
@@ -532,7 +536,20 @@ pauseEl.addEventListener('click', (e) => {
     location.reload();
     return;
   }
+  if (e.target.closest('[data-action=signout]')) {
+    signOut();
+    return;
+  }
   player.lock();
+});
+
+// Hosted mode: if the session ends (signed out elsewhere, token revoked, removed from the org) go back to sign-in.
+let leaving = false;
+setSignedOutHandler(() => {
+  if (leaving || !entered) return;
+  leaving = true;
+  hud.toast('🔒 Your sign-in ended. Taking you back to the sign-in screen…', 'warn', 4000);
+  setTimeout(() => location.reload(), 1800);
 });
 
 // ------------------------------------------------------------------ boot
@@ -543,16 +560,34 @@ async function boot() {
     status = await api.status();
   } catch (e) {
     document.getElementById('start').classList.add('show');
-    document.getElementById('start').replaceChildren(h('div', { class: 'start-card' }, h('h1', null, 'Company3D'), h('p', { class: 'error' }, `Can't reach the local server: ${e.message}`), h('p', null, 'Start it with npm start and reload.')));
+    document.getElementById('start').replaceChildren(h('div', { class: 'start-card' }, h('h1', null, 'Company3D'), h('p', { class: 'error' }, `Can't reach the server: ${e.message}`), h('p', null, 'Make sure it is running and reload.')));
     return;
   }
+
+  // A building link (/o/<org>) opens that organization, as long as GitHub says you belong to it.
+  let connectError = null;
+  const linkOrg = orgFromPath();
+  if (linkOrg && status.mode === 'github' && linkOrg.toLowerCase() !== String(status.owner || '').toLowerCase()) {
+    try {
+      status = await api.connect(linkOrg);
+    } catch (e) {
+      connectError = e.message;
+      status = await api.status().catch(() => status);
+    }
+  }
+  if (status.hosted && status.mode === 'github' && status.owner && !linkOrg) history.replaceState(null, '', `/o/${encodeURIComponent(status.owner)}`);
+  if (status.hosted && status.mode === 'demo' && linkOrg) history.replaceState(null, '', '/');
+  if (status.hosted && status.user) {
+    pauseEl.querySelector('.pause-card').append(h('button', { class: 'btn ghost', 'data-action': 'signout' }, `Sign out @${status.user.login}`));
+  }
+
   app.status = status;
   app.isDemo = status.mode === 'demo';
   setAvatarsEnabled(!app.isDemo);
   setRealAvatars(!app.isDemo);
 
   let worldPromise = null;
-  if (status.owner) {
+  if (status.mode && status.owner) {
     worldPromise = api.world().then((w) => {
       app.world = w;
       if (!entered) mountFloor(0, null); // backdrop for the title screen
@@ -562,6 +597,7 @@ async function boot() {
   }
 
   renderStart(status, {
+    error: connectError,
     onReload: () => location.reload(),
     onEnter: async () => {
       player.lock(); // must happen inside the click
@@ -582,7 +618,7 @@ async function boot() {
       hud.loading(null);
       hud.showHud(true);
       startPolling();
-      if (app.isDemo) hud.toast('🎭 Demo company with fictional data. Connect the GitHub CLI to see your real org.', 'info', 7000);
+      if (app.isDemo) hud.toast(status.hosted ? '🎭 Demo company with fictional data. Sign in with GitHub to see your real org.' : '🎭 Demo company with fictional data. Connect the GitHub CLI to see your real org.', 'info', 7000);
       hud.toast('👋 Take the elevator (behind you) to visit a repo — or walk east to the Manager\'s Office.', 'info', 8000);
     },
   });

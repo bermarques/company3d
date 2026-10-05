@@ -1,6 +1,6 @@
 {
   "name": "company3d",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A cartoon first-person 3D office that visualizes a GitHub organization: one floor per repo, devs at their laptops, a Kanban board and a manager's office.",
   "type": "module",
   "private": true,
@@ -9,7 +9,7 @@
     "demo": "node server.js --demo"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.12"
   },
   "dependencies": {
     "three": "^0.186.1"

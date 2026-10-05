@@ -1,5 +1,6 @@
-// Real data source: every read and write goes through the GitHub CLI (`gh api`).
-import { ghApi, graphql, GhError } from './gh.js';
+// Real data source. Every read and write goes through a GitHub client (the local CLI, or the signed-in
+// user's own token in hosted mode), so GitHub itself enforces what each person may see and do.
+import { GhError } from './github-client.js';
 import { composeFloor } from './compose.js';
 
 const OWNER_QUERY = `
@@ -13,7 +14,7 @@ query($owner: String!, $cursor: String) {
     repositories(first: 100, after: $cursor, ownerAffiliations: [OWNER], orderBy: { field: PUSHED_AT, direction: DESC }) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        name description url isPrivate isArchived isFork pushedAt
+        name description url isPrivate isArchived isFork pushedAt viewerPermission hasIssuesEnabled
         primaryLanguage { name color }
         issues(states: OPEN) { totalCount }
         pullRequests(states: OPEN) { totalCount }
@@ -35,7 +36,7 @@ query($owner: String!, $cursor: String) {
 const REPO_QUERY = `
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
-    name description url isPrivate isArchived pushedAt
+    name description url isPrivate isArchived pushedAt viewerPermission hasIssuesEnabled
     primaryLanguage { name color }
     issues(states: OPEN, first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) {
       totalCount
@@ -91,15 +92,18 @@ function mapRepoSummary(r) {
     languageColor: r.primaryLanguage ? r.primaryLanguage.color : null,
     openIssues: r.issues ? r.issues.totalCount : 0,
     openPRs: r.pullRequests ? r.pullRequests.totalCount : r.openPRs ? r.openPRs.totalCount : 0,
+    // READ | TRIAGE | WRITE | MAINTAIN | ADMIN for the person looking — drives which buttons they get.
+    permission: r.viewerPermission || 'READ',
+    hasIssues: r.hasIssuesEnabled !== false,
   };
 }
 
-async function paginate(query, variables, pick, maxPages = 10) {
+async function paginate(client, query, variables, pick, maxPages = 10) {
   const all = [];
   let cursor = null;
   let first = null;
   for (let page = 0; page < maxPages; page++) {
-    const data = await graphql(query, { ...variables, cursor });
+    const data = await client.graphql(query, { ...variables, cursor });
     if (!first) first = data;
     const conn = pick(data);
     if (!conn) break;
@@ -110,11 +114,11 @@ async function paginate(query, variables, pick, maxPages = 10) {
   return { first, all };
 }
 
-async function restPages(endpoint, maxPages = 5) {
+async function restPages(client, endpoint, maxPages = 5) {
   const all = [];
   for (let page = 1; page <= maxPages; page++) {
     const sep = endpoint.includes('?') ? '&' : '?';
-    const res = await ghApi(`${endpoint}${sep}per_page=100&page=${page}`);
+    const res = await client.rest(`${endpoint}${sep}per_page=100&page=${page}`);
     if (!Array.isArray(res) || res.length === 0) break; // 204 No Content (empty repo) yields null
     all.push(...res);
     if (res.length < 100) break;
@@ -122,28 +126,71 @@ async function restPages(endpoint, maxPages = 5) {
   return all;
 }
 
-export function createGithubProvider(gh) {
-  const me = gh.user;
+/**
+ * @param {{ client: object, viewer: { login: string, name?: string, avatarUrl?: string } }} opts
+ */
+export function createGithubProvider({ client, viewer }) {
+  const me = viewer;
 
   return {
     mode: 'github',
     viewer: me,
 
     async listOwners() {
-      const orgs = await ghApi('user/orgs?per_page=100');
+      let orgs = null;
+      if (client.kind === 'token') {
+        // GitHub App tokens: only organizations where the app is installed are usable.
+        try {
+          const res = await client.rest('user/installations?per_page=100');
+          orgs = (res && res.installations ? res.installations : [])
+            .map((i) => i.account)
+            .filter((a) => a && a.type === 'Organization')
+            .map((a) => ({ login: a.login, description: a.description || '', avatar_url: a.avatar_url }));
+        } catch {
+          orgs = null; // classic OAuth App token: fall back to org memberships
+        }
+      }
+      if (!orgs) {
+        const res = await client.rest('user/orgs?per_page=100');
+        orgs = Array.isArray(res) ? res : [];
+      }
       return [
-        ...(Array.isArray(orgs) ? orgs : []).map((o) => ({
-          login: o.login,
-          type: 'Organization',
-          description: o.description || '',
-          avatarUrl: o.avatar_url,
-        })),
+        ...orgs.map((o) => ({ login: o.login, type: 'Organization', description: o.description || '', avatarUrl: o.avatar_url })),
         { login: me.login, type: 'User', description: 'Your personal account', avatarUrl: me.avatarUrl },
       ];
     },
 
+    /**
+     * What the viewer may do in this owner's building.
+     * role: 'owner' (their own account) | 'admin' | 'member' | 'none'
+     */
+    async access(ownerLogin) {
+      if (ownerLogin.toLowerCase() === me.login.toLowerCase()) {
+        return { role: 'owner', canManage: true, canCreateRepo: true };
+      }
+      let membership;
+      try {
+        membership = await client.rest(`user/memberships/orgs/${ownerLogin}`);
+      } catch (e) {
+        if ([401, 403, 404].includes(e.status)) return { role: 'none', canManage: false, canCreateRepo: false };
+        throw e;
+      }
+      if (!membership || membership.state !== 'active') return { role: 'none', canManage: false, canCreateRepo: false };
+      const admin = membership.role === 'admin';
+      let membersCanCreate = false;
+      if (!admin) {
+        try {
+          const org = await client.rest(`orgs/${ownerLogin}`);
+          membersCanCreate = !!(org && org.members_can_create_repositories);
+        } catch {
+          membersCanCreate = false;
+        }
+      }
+      return { role: admin ? 'admin' : 'member', canManage: admin, canCreateRepo: admin || membersCanCreate };
+    },
+
     async getWorld(ownerLogin) {
-      const { first, all } = await paginate(OWNER_QUERY, { owner: ownerLogin }, (d) => d && d.repositoryOwner && d.repositoryOwner.repositories);
+      const { first, all } = await paginate(client, OWNER_QUERY, { owner: ownerLogin }, (d) => d && d.repositoryOwner && d.repositoryOwner.repositories);
       const ownerNode = first && first.repositoryOwner;
       if (!ownerNode) throw new GhError(`Could not find a GitHub organization or user named "${ownerLogin}"`, { status: 404 });
       const owner = {
@@ -155,7 +202,7 @@ export function createGithubProvider(gh) {
       };
       let members = null;
       if (owner.type === 'Organization') {
-        const res = await paginate(MEMBERS_QUERY, { owner: owner.login }, (d) => d && d.organization && d.organization.membersWithRole);
+        const res = await paginate(client, MEMBERS_QUERY, { owner: owner.login }, (d) => d && d.organization && d.organization.membersWithRole);
         members = res.all.map((m) => ({ login: m.login, name: m.name, avatarUrl: m.avatarUrl }));
       }
       return { owner, repos: all.map(mapRepoSummary), members };
@@ -164,8 +211,8 @@ export function createGithubProvider(gh) {
     async getFloor(world, repoName) {
       const owner = world.owner;
       const [data, contributors] = await Promise.all([
-        graphql(REPO_QUERY, { owner: owner.login, name: repoName }),
-        restPages(`repos/${owner.login}/${repoName}/contributors`, 2).catch((e) => {
+        client.graphql(REPO_QUERY, { owner: owner.login, name: repoName }),
+        restPages(client, `repos/${owner.login}/${repoName}/contributors`, 2).catch((e) => {
           console.warn(`[gh] contributors for ${repoName}:`, e.message);
           return [];
         }),
@@ -247,14 +294,14 @@ export function createGithubProvider(gh) {
     },
 
     async listLabels(ownerLogin, repoName) {
-      const labels = await restPages(`repos/${ownerLogin}/${repoName}/labels`, 2);
+      const labels = await restPages(client, `repos/${ownerLogin}/${repoName}/labels`, 2);
       return labels.map((l) => ({ name: l.name, color: l.color, description: l.description || '' }));
     },
 
     async createRepo(world, { name, description, isPrivate, autoInit }) {
       const body = { name, description: description || '', private: !!isPrivate, auto_init: !!autoInit };
       const endpoint = world.owner.type === 'Organization' ? `orgs/${world.owner.login}/repos` : 'user/repos';
-      const r = await ghApi(endpoint, { method: 'POST', body });
+      const r = await client.rest(endpoint, { method: 'POST', body });
       return { name: r.name, url: r.html_url };
     },
 
@@ -262,7 +309,7 @@ export function createGithubProvider(gh) {
       const payload = { title, body: body || '' };
       if (assignees && assignees.length) payload.assignees = assignees;
       if (labels && labels.length) payload.labels = labels;
-      const r = await ghApi(`repos/${ownerLogin}/${repoName}/issues`, { method: 'POST', body: payload });
+      const r = await client.rest(`repos/${ownerLogin}/${repoName}/issues`, { method: 'POST', body: payload });
       return { number: r.number, url: r.html_url, title: r.title };
     },
 
@@ -270,22 +317,33 @@ export function createGithubProvider(gh) {
       const payload = {};
       if (assignees) payload.assignees = assignees;
       if (state) payload.state = state;
-      const r = await ghApi(`repos/${ownerLogin}/${repoName}/issues/${number}`, { method: 'PATCH', body: payload });
+      const r = await client.rest(`repos/${ownerLogin}/${repoName}/issues/${number}`, { method: 'PATCH', body: payload });
       return { number: r.number, url: r.html_url, state: r.state };
     },
 
     async mergePR(ownerLogin, repoName, number, method = 'squash') {
-      const r = await ghApi(`repos/${ownerLogin}/${repoName}/pulls/${number}/merge`, {
+      const r = await client.rest(`repos/${ownerLogin}/${repoName}/pulls/${number}/merge`, {
         method: 'PUT',
         body: { merge_method: method },
       });
       return { merged: !!r.merged, message: r.message, sha: r.sha };
     },
 
-    async avatar(userLogin) {
-      const res = await fetch(`https://github.com/${encodeURIComponent(userLogin)}.png?size=128`, { redirect: 'follow' });
-      if (!res.ok) return null;
-      return { buffer: Buffer.from(await res.arrayBuffer()), type: res.headers.get('content-type') || 'image/png' };
-    },
+    avatar: fetchAvatar,
   };
+}
+
+const AVATAR_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Public GitHub avatar, re-served same-origin so canvas textures can use it. */
+export async function fetchAvatar(userLogin) {
+  const res = await fetch(`https://github.com/${encodeURIComponent(userLogin)}.png?size=128`, { redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) return null;
+  const host = new URL(res.url).hostname;
+  if (host !== 'github.com' && !host.endsWith('.githubusercontent.com')) return null;
+  const type = (res.headers.get('content-type') || '').split(';')[0].trim();
+  if (!AVATAR_TYPES.has(type)) return null;
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > 300_000) return null;
+  return { buffer, type };
 }

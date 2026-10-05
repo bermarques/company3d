@@ -20,13 +20,17 @@ export function controlsList() {
  *  onEnter()            — status is ready, go in
  *  onReload()           — connection changed; reload the app
  */
-export function renderStart(status, { onEnter, onReload }) {
+export function renderStart(status, { onEnter, onReload, error }) {
   const root = document.getElementById('start');
   root.classList.add('show');
   const card = h('div', { class: 'start-card' });
   root.replaceChildren(card);
 
-  const title = h('div', { class: 'start-title' }, h('div', { class: 'logo' }, '🏢'), h('div', null, h('h1', null, 'Company3D'), h('p', null, 'Walk around your GitHub organization. One floor per repo, every dev at their laptop.')));
+  if (status.hosted) {
+    card.append(...hostedStart(status, { onEnter, onReload, error }), controlsList());
+    return;
+  }
+  const title = titleBlock();
 
   const enterBtn = (label) => h('button', { class: 'btn big primary', onClick: onEnter }, label);
 
@@ -121,6 +125,126 @@ export function renderStart(status, { onEnter, onReload }) {
   }
   parts.push(controlsList());
   card.append(...parts);
+}
+
+function titleBlock() {
+  return h('div', { class: 'start-title' }, h('div', { class: 'logo' }, '🏢'), h('div', null, h('h1', null, 'Company3D'), h('p', null, 'Walk around your GitHub organization. One floor per repo, every dev at their laptop.')));
+}
+
+/** /o/<org> in the address bar: a building link someone shared. */
+export function orgFromPath() {
+  const m = location.pathname.match(/^\/o\/([A-Za-z0-9-]{1,39})\/?$/);
+  return m ? m[1] : null;
+}
+
+export const buildingLink = (org) => `${location.origin}/o/${encodeURIComponent(org)}`;
+
+/** The building's shareable link with a copy button. Anyone can open it, but only org members get in. */
+export function shareBox(org) {
+  const link = buildingLink(org);
+  const copy = h('button', { class: 'btn small' }, '📋 Copy');
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      copy.textContent = '✅ Copied';
+    } catch {
+      copy.textContent = 'Select & copy';
+    }
+  });
+  return h(
+    'div',
+    { class: 'share-box' },
+    h('span', null, '🔗 Share with your team. They sign in with GitHub and see what their own access allows:'),
+    h('div', { class: 'row' }, h('input', { value: link, readonly: true, 'aria-label': 'Building link', onFocus: (e) => e.target.select() }), copy),
+  );
+}
+
+export async function signOut() {
+  try {
+    await api.logout();
+  } finally {
+    location.assign('/');
+  }
+}
+
+const LOGIN_ERRORS = {
+  denied: 'Sign-in was cancelled on GitHub.',
+  expired: 'That sign-in link expired or was opened in another browser. Please try again.',
+  github: "GitHub didn't accept the sign-in. Please try again.",
+};
+
+/** Hosted mode: sign in with GitHub, pick (or follow a link to) an organization, share the building. */
+function hostedStart(status, { onEnter, onReload, error }) {
+  const parts = [titleBlock()];
+  const linkOrg = orgFromPath();
+  const loginError = LOGIN_ERRORS[new URLSearchParams(location.search).get('login_error')];
+  const signInBtn = (label = 'Sign in with GitHub') => h('a', { class: 'btn big primary', href: api.loginUrl(linkOrg ? `/o/${linkOrg}` : '/') }, label);
+  const demoBtn = h('button', { class: 'btn ghost' }, '🎭 Try the demo company');
+  demoBtn.addEventListener('click', async () => {
+    demoBtn.disabled = true;
+    try {
+      await api.startDemo();
+      onReload();
+    } catch (e) {
+      demoBtn.disabled = false;
+      demoBtn.after(h('p', { class: 'error' }, e.message));
+    }
+  });
+
+  // not signed in
+  if (!status.mode) {
+    if (linkOrg) parts.push(h('div', { class: 'status ok' }, '📨 You were invited to the ', h('strong', null, linkOrg), ' building. Sign in with the GitHub account you use there.'));
+    if (loginError) parts.push(h('p', { class: 'error' }, loginError));
+    parts.push(
+      h('div', { class: 'row' }, signInBtn(), demoBtn),
+      h('p', { class: 'muted small' }, 'You only see what your GitHub account can already see, and can only do what it is allowed to do. Your GitHub token never reaches the browser and is revoked when you sign out.'),
+    );
+    return parts;
+  }
+
+  if (status.mode === 'demo') {
+    parts.push(
+      h('div', { class: 'status warn' }, '🎭 Demo company: fictional data, just for you. Changes vanish when you leave.'),
+      h('div', { class: 'row' }, h('button', { class: 'btn big primary', onClick: onEnter }, 'Enter the demo company →'), signInBtn('Sign in with GitHub instead')),
+    );
+    return parts;
+  }
+
+  parts.push(h('div', { class: 'status ok row space' }, h('span', null, '✅ Signed in as ', h('strong', null, `@${status.user.login}`)), h('button', { class: 'btn small ghost', onClick: signOut }, 'Sign out')));
+  if (error) parts.push(h('p', { class: 'error' }, error));
+
+  const picker = h('div');
+  const loadPicker = async () => {
+    picker.replaceChildren(h('p', { class: 'muted' }, 'Loading your organizations…'));
+    try {
+      const owners = await api.owners();
+      picker.replaceChildren(
+        owners.length
+          ? h(
+              'div',
+              { class: 'owner-grid' },
+              // real links, so the address bar always holds a shareable building URL
+              owners.map((o) => h('a', { class: `owner-btn ${o.login === status.owner ? 'here' : ''}`, href: `/o/${encodeURIComponent(o.login)}` }, h('strong', null, o.login), h('small', null, o.type === 'User' ? 'your personal account' : o.description || 'organization'))),
+            )
+          : h('p', { class: 'muted' }, 'No organizations available yet.'),
+        status.installUrl ? h('p', { class: 'muted small' }, "Don't see your organization? An owner needs to ", h('a', { href: status.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'install the Company3D GitHub App'), ' on it.') : null,
+      );
+    } catch (e) {
+      picker.replaceChildren(h('p', { class: 'error' }, e.message));
+    }
+  };
+
+  if (status.owner) {
+    parts.push(
+      h('div', { class: 'row' }, h('button', { class: 'btn big primary', onClick: onEnter }, `Enter ${status.owner} →`)),
+      shareBox(status.owner),
+      h('details', null, h('summary', { onClick: () => picker.childElementCount || loadPicker() }, 'Switch organization'), picker),
+    );
+  } else {
+    parts.push(h('h3', null, 'Pick a building to enter'), picker);
+    loadPicker();
+  }
+  return parts;
 }
 
 export function hideStart() {

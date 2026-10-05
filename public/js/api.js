@@ -1,7 +1,15 @@
-// Fetch wrappers for the local Company3D server.
+// Fetch wrappers for the Company3D server.
+let onSignedOut = () => {};
+
+/** Called when the server says our session is gone (hosted mode) so the app can show the sign-in screen. */
+export function setSignedOutHandler(fn) {
+  onSignedOut = fn;
+}
+
 async function req(method, url, body) {
   const res = await fetch(url, {
     method,
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-Company3D': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -14,6 +22,9 @@ async function req(method, url, body) {
   if (!res.ok) {
     const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
     err.status = res.status;
+    err.signedOut = !!(data && data.signedOut);
+    err.noOrg = !!(data && data.noOrg);
+    if (err.signedOut) onSignedOut(err);
     throw err;
   }
   return data;
@@ -27,6 +38,9 @@ export const api = {
   owners: () => req('GET', '/api/owners'),
   connect: (owner) => req('POST', '/api/connect', { owner }),
   useDemo: () => req('POST', '/api/connect', { demo: true }),
+  startDemo: () => req('POST', '/api/demo', {}),
+  logout: () => req('POST', '/auth/logout', {}),
+  loginUrl: (next = location.pathname) => `/auth/login?next=${enc(next)}`,
   world: (fresh = false) => req('GET', `/api/world${fresh ? '?fresh=1' : ''}`),
   floor: (repo, fresh = false) => req('GET', `/api/floor/${enc(repo)}${fresh ? '?fresh=1' : ''}`),
   labels: (repo) => req('GET', `/api/labels/${enc(repo)}`),

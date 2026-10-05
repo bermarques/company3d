@@ -6,6 +6,8 @@ import { hud } from './hud.js';
 import { api } from '../api.js';
 import { timeAgo, makeCanvas } from '../engine/canvas.js';
 import { drawRepoMap } from '../world/screens.js';
+import { can, roleLabel } from '../permissions.js';
+import { shareBox, signOut } from './start.js';
 
 const TABS = [
   ['floors', '📁 Repos & floors'],
@@ -28,7 +30,7 @@ export function openManagerConsole(app, tab = 'floors') {
       const nav = h(
         'nav',
         { class: 'tabs' },
-        TABS.map(([key, label]) =>
+        TABS.filter(([key]) => key !== 'new' || can.createRepo(app)).map(([key, label]) =>
           h(
             'button',
             {
@@ -46,7 +48,8 @@ export function openManagerConsole(app, tab = 'floors') {
           ),
         ),
       );
-      const panel = { floors: floorsTab, new: newRepoTab, links: linksTab, org: orgTab }[ui.tab](app, modal);
+      if (ui.tab === 'new' && !can.createRepo(app)) ui.tab = 'floors';
+      const panel = { floors: floorsTab, new: newRepoTab, links: linksTab, org: app.status.hosted ? hostedOrgTab : orgTab }[ui.tab](app, modal);
       const w = app.world;
       const totalIssues = w.repos.reduce((n, r) => n + r.openIssues, 0);
       const totalPRs = w.repos.reduce((n, r) => n + r.openPRs, 0);
@@ -57,6 +60,7 @@ export function openManagerConsole(app, tab = 'floors') {
           'div',
           { class: 'stats' },
           stat('🏢', w.owner.login, app.isDemo ? 'demo company' : w.owner.type === 'User' ? 'personal account' : 'organization'),
+          stat('🎫', roleLabel(app), `@${app.viewerLogin()}`),
           stat('📦', w.repos.length, 'repositories'),
           stat('🛗', w.floors.length, 'floors'),
           stat('👩‍💻', w.memberCount ?? '—', 'people'),
@@ -77,6 +81,7 @@ function stat(icon, value, label) {
 // ------------------------------------------------------------------ floors
 function floorsTab(app, modal) {
   const w = app.world;
+  const editable = can.manage(app);
   const floors = [...w.floors];
   const save = async (next) => {
     await app.actions.saveFloors(next);
@@ -99,7 +104,7 @@ function floorsTab(app, modal) {
     return h(
       'tr',
       { 'data-name': r.name.toLowerCase(), class: on ? '' : 'off' },
-      h('td', null, h('label', { class: 'switch', title: on ? 'Remove this floor' : 'Give this repo a floor' }, h('input', { type: 'checkbox', checked: on, onChange: (e) => toggle(r.name, e.target.checked) }), h('span'))),
+      h('td', null, editable ? h('label', { class: 'switch', title: on ? 'Remove this floor' : 'Give this repo a floor' }, h('input', { type: 'checkbox', checked: on, onChange: (e) => toggle(r.name, e.target.checked) }), h('span')) : on ? '✅' : '—'),
       h('td', { class: 'floor-cell' }, on ? `${idx + 1}F` : '—'),
       h('td', null, h('strong', null, r.name), r.isArchived ? h('span', { class: 'pill muted-pill' }, 'archived') : null, r.isFork ? h('span', { class: 'pill muted-pill' }, 'fork') : null, h('div', { class: 'muted small' }, r.description || '')),
       h('td', null, r.language ? h('span', null, h('span', { class: 'dot', style: { background: r.languageColor || '#adb5bd' } }), r.language) : h('span', { class: 'muted' }, '—')),
@@ -110,8 +115,8 @@ function floorsTab(app, modal) {
       h(
         'td',
         { class: 'actions-cell' },
-        on ? h('button', { class: 'btn small ghost', title: 'Move up', onClick: () => move(r.name, -1) }, '▲') : null,
-        on ? h('button', { class: 'btn small ghost', title: 'Move down', onClick: () => move(r.name, 1) }, '▼') : null,
+        on && editable ? h('button', { class: 'btn small ghost', title: 'Move up', onClick: () => move(r.name, -1) }, '▲') : null,
+        on && editable ? h('button', { class: 'btn small ghost', title: 'Move down', onClick: () => move(r.name, 1) }, '▼') : null,
         on
           ? h(
               'button',
@@ -142,7 +147,9 @@ function floorsTab(app, modal) {
   return h(
     'div',
     null,
-    h('p', { class: 'muted' }, 'Choose which repositories get a floor in the building, and in what order. Changes apply to the elevator immediately.'),
+    editable
+      ? h('p', { class: 'muted' }, 'Choose which repositories get a floor in the building, and in what order. Changes apply to the elevator immediately.')
+      : readOnlyNote('The building layout'),
     h('div', { class: 'row space' }, filter, refresh),
     h('div', { class: 'table-wrap' }, h('table', { class: 'repo-table' }, h('thead', null, h('tr', null, ['Floor', '#', 'Repository', 'Language', '', 'Issues', 'PRs', 'Pushed', ''].map((t) => h('th', null, t)))), h('tbody', null, rows))),
   );
@@ -198,6 +205,7 @@ function newRepoTab(app) {
 // ------------------------------------------------------------------ connections
 function linksTab(app, modal) {
   const w = app.world;
+  const editable = can.manage(app);
   const names = w.repos.map((r) => r.name);
   const from = h('select', null, names.map((n) => h('option', { value: n }, n)));
   const kind = h('select', null, LINK_KINDS.map((k) => h('option', { value: k }, k)));
@@ -215,8 +223,8 @@ function linksTab(app, modal) {
   return h(
     'div',
     null,
-    h('p', { class: 'muted' }, 'Describe how your projects relate. Connections show on the map in this office and on each floor sign.'),
-    h('div', { class: 'row' }, from, kind, to, add),
+    editable ? h('p', { class: 'muted' }, 'Describe how your projects relate. Connections show on the map in this office and on each floor sign.') : readOnlyNote('Repo connections'),
+    editable ? h('div', { class: 'row' }, from, kind, to, add) : null,
     w.links.length
       ? h(
           'ul',
@@ -228,7 +236,9 @@ function linksTab(app, modal) {
               h('strong', null, l.from),
               ` ${l.kind} `,
               h('strong', null, l.to),
-              h(
+              !editable
+                ? null
+                : h(
                 'button',
                 {
                   class: 'btn small ghost',
@@ -247,7 +257,41 @@ function linksTab(app, modal) {
   );
 }
 
-// ------------------------------------------------------------------ organization
+function readOnlyNote(what) {
+  return h('div', { class: 'readonly-note' }, `🔒 ${what} can only be changed by organization owners. You're viewing it read-only.`);
+}
+
+// ------------------------------------------------------------------ organization (hosted)
+function hostedOrgTab(app) {
+  const s = app.status;
+  if (app.isDemo) {
+    return h('div', null, h('p', null, 'This is your private demo sandbox with a fictional company.'), h('a', { class: 'btn primary', href: api.loginUrl('/') }, 'Sign in with GitHub'));
+  }
+  const owners = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
+  api
+    .owners()
+    .then((list) =>
+      owners.replaceChildren(
+        h(
+          'div',
+          { class: 'owner-grid' },
+          list.map((o) => h('a', { class: `owner-btn ${o.login === app.world.owner.login ? 'here' : ''}`, href: `/o/${encodeURIComponent(o.login)}` }, h('strong', null, o.login), h('small', null, o.type === 'User' ? 'your personal account' : o.description || 'organization'))),
+        ),
+      ),
+    )
+    .catch((e) => owners.replaceChildren(h('p', { class: 'error' }, e.message)));
+  return h(
+    'div',
+    null,
+    h('div', { class: 'row space' }, h('p', null, 'Signed in as ', h('strong', null, `@${app.viewerLogin()}`), ` · ${roleLabel(app)} of ${app.world.owner.login}`), h('button', { class: 'btn ghost', onClick: signOut }, 'Sign out')),
+    shareBox(app.world.owner.login),
+    h('h3', null, 'Your buildings'),
+    owners,
+    s.installUrl && can.manage(app) ? h('p', { class: 'muted small' }, 'Add another organization by ', h('a', { href: s.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'installing the Company3D GitHub App'), ' on it.') : null,
+  );
+}
+
+// ------------------------------------------------------------------ organization (local gh CLI)
 function orgTab(app, modal) {
   const s = app.status;
   const box = h('div', null, h('p', { class: 'muted' }, 'Loading…'));

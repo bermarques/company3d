@@ -262,10 +262,19 @@ function buildRepoState(def, index) {
   };
 }
 
+// Each hosted visitor gets their own demo sandbox; keep it small.
+const DEMO_LIMITS = { repos: 20, issuesPerRepo: 200 };
+function limitError(message) {
+  const e = new Error(message);
+  e.status = 429;
+  return e;
+}
+
 export function createDemoProvider() {
   const repos = new Map(REPOS.map((def, i) => [def.name, buildRepoState(def, i)]));
 
-  const summary = (state) => ({ ...state.summary, openIssues: state.issues.length, openPRs: state.prs.length });
+  // The demo is a private sandbox, so the visitor gets full permissions everywhere.
+  const summary = (state) => ({ ...state.summary, openIssues: state.issues.length, openPRs: state.prs.length, permission: 'ADMIN', hasIssues: true });
   const need = (name) => {
     const s = repos.get(name);
     if (!s) {
@@ -282,6 +291,10 @@ export function createDemoProvider() {
 
     async listOwners() {
       return [{ login: OWNER.login, type: 'Organization', description: OWNER.description, avatarUrl: null }];
+    },
+
+    async access() {
+      return { role: 'admin', canManage: true, canCreateRepo: true };
     },
 
     async getWorld() {
@@ -310,6 +323,7 @@ export function createDemoProvider() {
     },
 
     async createRepo(_world, { name, description, isPrivate }) {
+      if (repos.size >= DEMO_LIMITS.repos) throw limitError('The demo company has reached its repository limit');
       if (repos.has(name)) {
         const e = new Error(`A repository named ${name} already exists`);
         e.status = 422;
@@ -340,6 +354,7 @@ export function createDemoProvider() {
 
     async createIssue(_owner, name, { title, body, assignees, labels }) {
       const s = need(name);
+      if (s.issues.length >= DEMO_LIMITS.issuesPerRepo) throw limitError('This demo repository has reached its issue limit');
       const number = s.nextNumber++;
       const now = new Date().toISOString();
       s.issues.unshift({
