@@ -596,7 +596,7 @@ async function boot() {
     worldPromise.catch(() => {});
   }
 
-  renderStart(status, {
+  const startOptions = {
     error: connectError,
     onReload: () => location.reload(),
     onEnter: async () => {
@@ -607,9 +607,10 @@ async function boot() {
         await (worldPromise || Promise.reject(new Error('No organization connected')));
       } catch (e) {
         hud.loading(null);
-        hud.toast(`Couldn't load the organization: ${e.message}`, 'error', 9000);
-        document.getElementById('start').classList.add('show');
         player.unlock();
+        // keep the reason on the title screen (e.g. a missing GitHub App permission), not just in a toast
+        renderStart(status, { ...startOptions, error: `Couldn't open the building: ${e.message}` });
+        if (!status.hosted) hud.toast(`Couldn't load the organization: ${e.message}`, 'error', 9000);
         return;
       }
       attract = false;
@@ -620,8 +621,26 @@ async function boot() {
       startPolling();
       if (app.isDemo) hud.toast(status.hosted ? '🎭 Demo company with fictional data. Sign in with GitHub to see your real org.' : '🎭 Demo company with fictional data. Connect the GitHub CLI to see your real org.', 'info', 7000);
       hud.toast('👋 Take the elevator (behind you) to visit a repo — or walk east to the Manager\'s Office.', 'info', 8000);
+      announceEmptyBuilding();
     },
-  });
+  };
+  renderStart(status, startOptions);
+  if (worldPromise && status.hosted) {
+    worldPromise.catch((e) => {
+      if (!entered) renderStart(status, { ...startOptions, error: `Couldn't open the building: ${e.message}` });
+    });
+  }
+}
+
+/** A building with no floors looks broken, so say why. */
+function announceEmptyBuilding() {
+  const w = app.world;
+  if (w.floors.length) return;
+  if (!w.repos.length) {
+    hud.toast(`🏗️ ${w.owner.login} has no repositories you can see yet, so there are no floors. Create one from the Manager's Office.`, 'warn', 12000);
+  } else {
+    hud.toast("🏗️ No repositories have a floor yet. An org owner can pick them in the Manager's Office console.", 'warn', 12000);
+  }
 }
 
 // ------------------------------------------------------------------ main loop
