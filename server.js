@@ -20,11 +20,13 @@ const { detectGh } = await import('./server/gh.js');
 const { cliClient, createTokenClient, GhError } = await import('./server/github-client.js');
 const { createGithubProvider, fetchAvatar } = await import('./server/github-provider.js');
 const { createDemoProvider } = await import('./server/demo-provider.js');
-const { getConfig, setConnection, fileSettingsStore, memorySettingsStore } = await import('./server/config.js');
+const { getConfig, setConnection, localSettings } = await import('./server/config.js');
+const { createSettings, memorySettings } = await import('./server/settings.js');
+const { connectDatabase } = await import('./server/db.js');
+const { createPgRepo } = await import('./server/repo.js');
 const { createSessionStore } = await import('./server/sessions.js');
 const { createAuth } = await import('./server/auth.js');
 const { rateLimiter, clientIp, inlineScriptHashes, contentSecurityPolicy, baseSecurityHeaders } = await import('./server/security.js');
-const { createStore } = await import('./server/store.js');
 const { createStripe } = await import('./server/stripe.js');
 const { createBilling, PLAN } = await import('./server/billing.js');
 
@@ -76,8 +78,23 @@ const auth = HOSTED
     })
   : null;
 
+// ---------------------------------------------------------------- database (hosted mode)
+if (HOSTED && !env.DATABASE_URL) {
+  console.error('\n  Hosted mode needs DATABASE_URL (a PostgreSQL connection string).\n');
+  process.exit(1);
+}
+let pool = null;
+if (HOSTED) {
+  try {
+    pool = await connectDatabase(env.DATABASE_URL);
+  } catch (e) {
+    console.error(`\n  Could not connect to the database: ${e.message}\n`);
+    process.exit(1);
+  }
+}
+const settingsFor = HOSTED ? createSettings(pool) : localSettings;
+
 // ---------------------------------------------------------------- subscriptions (hosted mode, optional)
-// With Stripe configured, a building only opens for organizations connected to an active subscription.
 const billingVars = ['STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID', 'STRIPE_WEBHOOK_SECRET'];
 const billingSet = billingVars.filter((k) => env[k]);
 if (billingSet.length && billingSet.length < billingVars.length) {
@@ -95,7 +112,7 @@ const COMPLIMENTARY_ORGS = (env.COMPLIMENTARY_ORGS || '')
 const billing =
   HOSTED && billingSet.length
     ? createBilling({
-        store: createStore(path.resolve(env.DATA_DIR || 'data', 'billing.json')),
+        repo: createPgRepo(pool),
         stripe: createStripe(env.STRIPE_SECRET_KEY),
         priceId: env.STRIPE_PRICE_ID,
         webhookSecret: env.STRIPE_WEBHOOK_SECRET,
@@ -215,18 +232,18 @@ function contextFor(req) {
       ns: localProvider.mode,
       owner,
       viewer: localProvider.viewer,
-      settings: owner ? fileSettingsStore(owner) : null,
+      settings: owner ? settingsFor(owner) : null,
     };
   }
   const s = sessions.get(req);
   if (!s) return { session: null, provider: null };
   if (s.kind === 'demo') {
     s.provider = s.provider || createDemoProvider();
-    s.demoSettings = s.demoSettings || memorySettingsStore();
+    s.demoSettings = s.demoSettings || memorySettings();
     return { session: s, provider: s.provider, ns: `d:${s.id}`, owner: 'demo-co', viewer: s.provider.viewer, settings: s.demoSettings };
   }
   s.provider = s.provider || createGithubProvider({ client: createTokenClient(() => auth.validToken(s)), viewer: s.user });
-  return { session: s, provider: s.provider, ns: `u:${s.user.id}`, owner: s.org, viewer: s.user, settings: s.org ? fileSettingsStore(s.org) : null };
+  return { session: s, provider: s.provider, ns: `u:${s.user.id}`, owner: s.org, viewer: s.user, settings: s.org ? settingsFor(s.org) : null };
 }
 
 function requireSession(ctx) {
@@ -250,9 +267,8 @@ async function requireOrg(ctx) {
     throw new HttpError(403, `You're not a member of ${ctx.owner} on GitHub`, { noOrg: true });
   }
   if (billing && ctx.session && ctx.session.kind === 'user') {
-    // your own personal building is a bonus while one of your organizations is subscribed
     const personal = access.role === 'owner' ? { memberOf: await memberOrgs(ctx) } : undefined;
-    const ent = billing.entitlement(ctx.owner, personal);
+    const ent = await billing.entitlement(ctx.owner, personal);
     if (!ent.ok) {
       const message =
         ent.reason === 'inactive'
@@ -284,8 +300,8 @@ async function getWorld(ctx, fresh = false) {
   return cached(`${ctx.ns}:${ctx.owner}:world`, 120_000, () => ctx.provider.getWorld(ctx.owner), fresh);
 }
 
-function floorsFor(ctx, world) {
-  const settings = ctx.settings.get();
+async function floorsFor(ctx, world) {
+  const settings = await ctx.settings.get();
   const names = new Set(world.repos.map((r) => r.name));
   if (settings.floors) return settings.floors.filter((n) => names.has(n));
   return world.repos.filter((r) => !r.isArchived).slice(0, DEFAULT_FLOOR_COUNT).map((r) => r.name);
@@ -362,15 +378,13 @@ route('GET', '/api/owners', async ({ ctx }) => {
   const owners = await cached(`${ctx.ns}:owners`, 60_000, () => ctx.provider.listOwners());
   const visible = owners.filter((o) => orgAllowed(o.login) || ctx.session.kind === 'demo');
   if (!billing || ctx.session.kind !== 'user') return visible;
-  // tell the title screen which buildings are open, and which ones this person could connect
   const me = ctx.session.user;
   const orgs = visible.filter((o) => o.type === 'Organization').map((o) => o.login);
-  return visible.map((o) => {
+  return Promise.all(visible.map(async (o) => {
     const personal = o.type === 'User' && o.login.toLowerCase() === me.login.toLowerCase() ? { memberOf: orgs } : undefined;
-    const ent = billing.entitlement(o.login, personal);
-    const ws = billing.workspace(o.login);
+    const [ent, ws] = await Promise.all([billing.entitlement(o.login, personal), billing.workspace(o.login)]);
     return { ...o, building: { open: ent.ok, bonus: !!ent.bonus, via: ent.via || null, reason: ent.reason || null, connectedByMe: !!ws && ws.ownerId === String(me.id), connectedBy: ws ? ws.ownerLogin : null } };
-  });
+  }));
 });
 
 route('POST', '/api/connect', async ({ ctx, body }) => {
@@ -443,8 +457,8 @@ route('GET', '/api/world', async ({ ctx, query }) => {
     repos: world.repos,
     memberCount: world.members ? world.members.length : null,
     members: world.members ? world.members.map((m) => ({ login: m.login, name: m.name })) : null,
-    floors: floorsFor(ctx, world),
-    links: ctx.settings.get().links,
+    floors: await floorsFor(ctx, world),
+    links: (await ctx.settings.get()).links,
   };
 });
 
@@ -479,9 +493,9 @@ route('PUT', '/api/settings', async ({ ctx, body }) => {
       kind: String((l && l.kind) || 'depends on').slice(0, 40),
     }));
   }
-  const settings = ctx.settings.update(patch);
+  const settings = await ctx.settings.update(patch);
   invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return { floors: floorsFor(ctx, world), links: settings.links };
+  return { floors: await floorsFor(ctx, world), links: settings.links };
 });
 
 route('POST', '/api/repos', async ({ ctx, body }) => {
@@ -497,8 +511,8 @@ route('POST', '/api/repos', async ({ ctx, body }) => {
   });
   // Give the new project a floor right away (if this person may change the layout).
   if (access.canManage) {
-    const floors = floorsFor(ctx, world);
-    ctx.settings.update({ floors: [...floors.filter((f) => f !== created.name), created.name] });
+    const floors = await floorsFor(ctx, world);
+    await ctx.settings.update({ floors: [...floors.filter((f) => f !== created.name), created.name] });
   }
   invalidate(`${ctx.ns}:${ctx.owner}:world`);
   return created;
@@ -736,11 +750,18 @@ if (!HOSTED) {
   selectLocalProvider();
 }
 
+process.on('SIGTERM', () => {
+  server.close();
+  Promise.resolve(pool && pool.end()).finally(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+});
+
 server.listen(PORT, HOST, () => {
   if (HOSTED) {
     console.log(`\n  🏢  Company3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
     console.log(`  Sign-in callback URL: ${ORIGIN}/auth/callback`);
     if (ALLOWED_ORGS.length) console.log(`  Restricted to organizations: ${ALLOWED_ORGS.join(', ')}`);
+    console.log('  Storage: PostgreSQL');
     if (billing) {
       console.log(`  Subscriptions: on (${PLAN.name}, ${env.STRIPE_SECRET_KEY.startsWith('sk_live_') ? 'LIVE' : 'test'} mode). Stripe webhook: ${ORIGIN}/stripe/webhook`);
       if (COMPLIMENTARY_ORGS.length) console.log(`  Free organizations: ${COMPLIMENTARY_ORGS.join(', ')}`);

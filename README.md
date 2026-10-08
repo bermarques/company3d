@@ -54,13 +54,17 @@ Then generate a **client secret** and **install the app** on your organization.
 ### 2. Configure and run
 
 ```bash
-cp .env.example .env       # then fill in PUBLIC_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (and GITHUB_APP_SLUG)
+cp .env.example .env       # then fill in PUBLIC_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, DATABASE_URL (and GITHUB_APP_SLUG)
 npm ci --omit=dev
 npm start
 ```
 
+Hosted mode needs **PostgreSQL** (`DATABASE_URL`): subscriptions and building settings live there, and the tables are
+created automatically on startup. On Railway, add a PostgreSQL service and set the app's `DATABASE_URL` variable to
+`${{Postgres.DATABASE_URL}}`; no volume is needed.
+
 Put it behind HTTPS: a reverse proxy like Caddy or nginx, or a platform such as Fly.io, Render or Railway. Set
-`TRUST_PROXY=1` when a proxy sits in front. Sessions live in memory, so run a single instance.
+`TRUST_PROXY=1` when a proxy sits in front. Sign-in sessions live in memory, so run a single instance.
 
 ### 3. Share the building
 
@@ -99,9 +103,8 @@ If a payment fails the building stays open while Stripe retries; once the subscr
    save (the portal won't open until it's been saved once in each mode).
 5. Optional: list organizations that should never pay (yours) in `COMPLIMENTARY_ORGS`.
 
-Test with Stripe's test card `4242 4242 4242 4242` (any future date, any CVC). Subscription records live in
-`DATA_DIR/billing.json`, so on Railway mount a **volume** and point `DATA_DIR` at it, or they're lost on redeploy.
-When you go live, repeat steps 1–4 in live mode and swap in the live keys.
+Test with Stripe's test card `4242 4242 4242 4242` (any future date, any CVC). Subscription records are stored in
+PostgreSQL. When you go live, repeat steps 1–4 in live mode and swap in the live keys.
 
 ## Controls
 
@@ -159,10 +162,12 @@ server/sessions.js         server-side sessions and cookies
 server/security.js         CSP and security headers, rate limits
 server/demo-provider.js    fictional company with in-memory mutations
 server/compose.js          turns issues/PRs/contributors/members into the floor model
-server/config.js           per-org building settings (data/config.json)
+server/config.js           local mode settings (data/config.json)
+server/db.js               PostgreSQL pool and schema migrations
+server/settings.js         per-org building settings (PostgreSQL)
 server/billing.js          subscriptions: plans, connected orgs, who may enter, Stripe webhooks
 server/stripe.js           minimal Stripe client and webhook signature check
-server/store.js            durable subscription records (data/billing.json)
+server/repo.js             subscription records (PostgreSQL)
 public/js/main.js          renderer, game loop, floors, elevator rides, polling, actions
 public/js/permissions.js   which buttons the viewer gets, from their GitHub permissions
 public/js/world/*          building, furniture, characters, repo floor, lobby, canvas screens
@@ -176,8 +181,11 @@ Security details are in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
+- **Separate server repository.** Move the server into its own repository, with Prisma for the database schema,
+  migrations and queries, and proper handling of errors, validation and logging. This repository becomes the
+  client.
 - **Subscriptions, next steps.** Bigger plans (more organizations), GitHub App webhooks so uninstalls and membership
-  removals take effect instantly, and moving subscription records to Postgres when running more than one instance.
+  removals take effect instantly, and sign-in sessions in PostgreSQL so deploys don't sign people out.
 - **Character customization.** People who sign in with their own GitHub account can design the character that
   represents them (hair, colors, accessories). Profiles will be keyed by GitHub user id and editable only by that
   person, from a "Me" app on the phone.
