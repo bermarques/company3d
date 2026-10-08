@@ -1,9 +1,6 @@
 node_modules/
 
-# runtime state: connected org, floor order, repo links, sessions
-data/
-
-# secrets (GitHub app credentials, session secret)
+# secrets
 .env
 .env.*
 !.env.example

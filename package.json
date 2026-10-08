@@ -1,18 +1,16 @@
 {
   "name": "worktown3d",
   "version": "0.2.0",
-  "description": "A cartoon first-person 3D office that visualizes a GitHub organization: one floor per repo, devs at their laptops, a Kanban board and a manager's office.",
+  "description": "Web app for Worktown3D: a cartoon first-person 3D office that visualizes a GitHub organization. One floor per repo, devs at their laptops, a Kanban board and a manager's office.",
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "demo": "node server.js --demo"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=20.12"
   },
   "dependencies": {
-    "pg": "^8.23.1",
     "three": "^0.186.1"
   }
 }

@@ -8,36 +8,17 @@ on this repository instead.
 
 ## Security model
 
-**Local mode** (no `GITHUB_CLIENT_ID`): the server acts as whoever is signed in to the GitHub CLI on that machine.
-It listens on `127.0.0.1` only, refuses requests whose `Host` isn't localhost (DNS-rebinding protection) and
-requires a custom header plus same origin on every write (CSRF protection). Don't expose local mode to a network.
+This repository is the web app. Sign-in, GitHub tokens, permissions, building settings and subscriptions are
+handled by the API (worktown3d-api), whose SECURITY.md covers them.
 
-**Hosted mode** (`GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` + `PUBLIC_URL`):
-
-- Everyone signs in with GitHub (OAuth web flow with `state` bound to the browser and PKCE). Every GitHub call is
-  made with that person's own token, so GitHub enforces repository and organization permissions. The server never
-  uses the GitHub CLI in this mode.
-- Tokens live only in server memory, are never sent to the browser, are refreshed when they expire (GitHub Apps)
-  and are revoked on sign-out. Sessions are random 256-bit ids in `HttpOnly`, `SameSite=Lax`, `Secure`
-  (`__Host-` prefixed) cookies with idle and absolute expiry.
-- Access to a building requires active membership of that organization, re-checked every few minutes, so people
-  who leave lose access. Worktown3D's own settings (floor layout, repo connections) can only be changed by org owners.
-- Cached GitHub data is namespaced per user, so one person's private data never reaches another.
+- The browser only talks to this server. It serves the client and forwards `/api`, `/auth` and `/stripe` to the API
+  (`API_URL`) unchanged, keeping the `Host` header and appending the client address to `X-Forwarded-For`, so the
+  API's host check, CSRF check and `__Host-` session cookies all apply to this one origin. `API_URL` must be a
+  private address: the API should never be reachable from the internet.
+- Without `PUBLIC_URL` (local mode) it listens on `127.0.0.1` and only answers for `localhost` host names
+  (DNS-rebinding protection). With `PUBLIC_URL` it only answers for that host name.
 - Strict Content-Security-Policy (no inline script except the hashed import map, no framing), `nosniff`,
-  `Referrer-Policy`, HSTS on https, rate limits on sign-in, API and writes, request size and time limits.
+  `Referrer-Policy`, HSTS on https, and request time limits. Only files under `public/` and the Three.js build are
+  served.
 - All GitHub content is rendered as text (no `innerHTML`); external links must be `https://`.
-- The unauthenticated demo runs in a private in-memory sandbox per visitor with size limits.
-
-**Subscriptions (Stripe):**
-
-- Card details never touch this server: people pay on Stripe Checkout and manage billing in Stripe's customer portal.
-  The Stripe secret key stays server-side.
-- The webhook (`/stripe/webhook`) only accepts requests with a valid `Stripe-Signature` (HMAC-SHA256, constant-time
-  compare, 5-minute replay window). Events are de-duplicated, and subscription changes are re-read from Stripe rather
-  than trusted from the event body, so out-of-order or forged payloads can't open a building.
-- Returning from Checkout, the payment is confirmed with Stripe directly, and only for the signed-in person who
-  started that checkout.
-- Only organization owners can connect an organization to a subscription; plan limits are enforced on the server.
-
-Known limits: sessions are in memory (one instance; everyone signs in again after a restart), and there's no
-audit log yet.
+- Card details never reach Worktown3D: people pay on Stripe Checkout and manage billing in Stripe's customer portal.
