@@ -56,19 +56,7 @@ export function updateOwnerSettings(owner, patch) {
   return ownerSettings(owner);
 }
 
-/** Settings kept in memory only — used for each hosted visitor's private demo sandbox. */
-export function memorySettingsStore() {
-  let s = { floors: null, links: [] };
-  return {
-    get: () => ({ ...s }),
-    update(patch) {
-      s = { ...s, ...patch };
-      return { ...s };
-    },
-  };
-}
-
-export const fileSettingsStore = (owner) => ({
-  get: () => ownerSettings(owner),
-  update: (patch) => updateOwnerSettings(owner, patch),
+export const localSettings = (owner) => ({
+  get: async () => ownerSettings(owner),
+  update: async (patch) => updateOwnerSettings(owner, patch),
 });
