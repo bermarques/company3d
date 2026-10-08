@@ -181,6 +181,9 @@ Security details are in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
+- **Separate server repository.** Move the server into its own repository, with Prisma for the database schema,
+  migrations and queries, and proper handling of errors, validation and logging. This repository becomes the
+  client.
 - **Subscriptions, next steps.** Bigger plans (more organizations), GitHub App webhooks so uninstalls and membership
   removals take effect instantly, and sign-in sessions in PostgreSQL so deploys don't sign people out.
 - **Character customization.** People who sign in with their own GitHub account can design the character that
