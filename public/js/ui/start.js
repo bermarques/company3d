@@ -1,6 +1,7 @@
 // Title screen: GitHub connection status, organization picker and the "enter the building" button.
 import { h } from './dom.js';
 import { api } from '../api.js';
+import { planCard, buildingButton } from './billing.js';
 
 const CONTROLS = [
   ['W A S D', 'walk'],
@@ -20,14 +21,14 @@ export function controlsList() {
  *  onEnter()            — status is ready, go in
  *  onReload()           — connection changed; reload the app
  */
-export function renderStart(status, { onEnter, onReload, error }) {
+export function renderStart(status, { onEnter, onReload, error, notice, needsSubscription }) {
   const root = document.getElementById('start');
   root.classList.add('show');
   const card = h('div', { class: 'start-card' });
   root.replaceChildren(card);
 
   if (status.hosted) {
-    card.append(...hostedStart(status, { onEnter, onReload, error }), controlsList());
+    card.append(...hostedStart(status, { onEnter, onReload, error, notice, needsSubscription }), controlsList());
     return;
   }
   const title = titleBlock();
@@ -174,7 +175,7 @@ const LOGIN_ERRORS = {
 };
 
 /** Hosted mode: sign in with GitHub, pick (or follow a link to) an organization, share the building. */
-function hostedStart(status, { onEnter, onReload, error }) {
+function hostedStart(status, { onEnter, onReload, error, notice, needsSubscription }) {
   const parts = [titleBlock()];
   const linkOrg = orgFromPath();
   const loginError = LOGIN_ERRORS[new URLSearchParams(location.search).get('login_error')];
@@ -211,20 +212,23 @@ function hostedStart(status, { onEnter, onReload, error }) {
   }
 
   parts.push(h('div', { class: 'status ok row space' }, h('span', null, '✅ Signed in as ', h('strong', null, `@${status.user.login}`)), h('button', { class: 'btn small ghost', onClick: signOut }, 'Sign out')));
+  if (notice) parts.push(h('div', { class: `status ${notice.kind === 'ok' ? 'ok' : 'warn'}` }, notice.text));
   if (error) parts.push(h('p', { class: 'error' }, error));
+  // subscriptions: subscribers always see their plan; everyone else gets a one-line teaser unless they need it now
+  if (status.billing) parts.push(planCard({ compact: !!status.owner && !error && !needsSubscription }));
 
   const picker = h('div');
   const loadPicker = async () => {
     picker.replaceChildren(h('p', { class: 'muted' }, 'Loading your organizations…'));
     try {
-      const owners = await api.owners();
+      const [owners, summary] = await Promise.all([api.owners(), status.billing ? api.billing().catch(() => null) : null]);
       picker.replaceChildren(
         owners.length
           ? h(
               'div',
               { class: 'owner-grid' },
-              // real links, so the address bar always holds a shareable building URL
-              owners.map((o) => h('a', { class: `owner-btn ${o.login === status.owner ? 'here' : ''}`, href: `/o/${encodeURIComponent(o.login)}` }, h('strong', null, o.login), h('small', null, o.type === 'User' ? 'your personal account' : o.description || 'organization'))),
+              // open buildings are real links, so the address bar always holds a shareable building URL
+              owners.map((o) => buildingButton(o, { current: status.owner, summary })),
             )
           : h('p', { class: 'muted' }, 'No organizations available yet.'),
         status.installUrl ? h('p', { class: 'muted small' }, "Don't see your organization? An owner needs to ", h('a', { href: status.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'install the Company3D GitHub App'), ' on it.') : null,
@@ -234,7 +238,7 @@ function hostedStart(status, { onEnter, onReload, error }) {
     }
   };
 
-  if (status.owner) {
+  if (status.owner && !needsSubscription) {
     parts.push(
       h('div', { class: 'row' }, h('button', { class: 'btn big primary', onClick: onEnter }, `Enter ${status.owner} →`)),
       shareBox(status.owner),

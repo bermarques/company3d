@@ -38,6 +38,7 @@ only your company will use it).
 | Homepage URL | your `PUBLIC_URL` |
 | Callback URL | `PUBLIC_URL/auth/callback` (for example `https://company3d.example.com/auth/callback`) |
 | Expire user authorization tokens | ✅ on |
+| Setup URL (optional) | `PUBLIC_URL/`, so people land back in Company3D after installing the app |
 | Webhook | off (not used yet) |
 | Where can it be installed | "Only on this account" for one company, "Any account" for a public product |
 
@@ -74,6 +75,33 @@ the organization and shows them exactly what their GitHub access allows:
 | Not a member | nothing | they're told they're not part of the org |
 
 People who leave the organization lose access within a few minutes, and they stop appearing as characters.
+
+### 4. Subscriptions (optional, Stripe)
+
+With Stripe configured, an organization's building only opens while it's connected to an active subscription.
+Without it, every member of an organization can open its building (handy for self-hosting).
+
+**How customers use it:** sign in with GitHub → **Subscribe** (Stripe Checkout) → install the GitHub App on their
+organization → **Connect** it on the title screen → share the building link with the team. Teammates don't pay.
+The Basic plan connects **one organization**, and the subscriber's **personal building is free** while one of their
+organizations is subscribed. Cards, invoices and cancelling are handled in Stripe's customer portal (**Manage billing**).
+If a payment fails the building stays open while Stripe retries; once the subscription ends it closes.
+
+**Set up Stripe (test mode first):**
+1. **Product catalog → Add product**: "Company3D Basic", recurring price **R$25.00 BRL / month**. Copy the
+   **Price ID** (`price_…`) into `STRIPE_PRICE_ID`.
+2. **Developers → API keys**: copy the secret key (`sk_test_…`) into `STRIPE_SECRET_KEY`.
+3. **Developers → Webhooks → Add endpoint**: `PUBLIC_URL/stripe/webhook`, with the events
+   `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, `customer.subscription.paused`, `customer.subscription.resumed`.
+   Copy its signing secret (`whsec_…`) into `STRIPE_WEBHOOK_SECRET`.
+4. **Settings → Billing → Customer portal**: allow updating payment methods, viewing invoices and cancelling, then
+   save (the portal won't open until it's been saved once in each mode).
+5. Optional: list organizations that should never pay (yours) in `COMPLIMENTARY_ORGS`.
+
+Test with Stripe's test card `4242 4242 4242 4242` (any future date, any CVC). Subscription records live in
+`DATA_DIR/billing.json`, so on Railway mount a **volume** and point `DATA_DIR` at it, or they're lost on redeploy.
+When you go live, repeat steps 1–4 in live mode and swap in the live keys.
 
 ## Controls
 
@@ -132,10 +160,13 @@ server/security.js         CSP and security headers, rate limits
 server/demo-provider.js    fictional company with in-memory mutations
 server/compose.js          turns issues/PRs/contributors/members into the floor model
 server/config.js           per-org building settings (data/config.json)
+server/billing.js          subscriptions: plans, connected orgs, who may enter, Stripe webhooks
+server/stripe.js           minimal Stripe client and webhook signature check
+server/store.js            durable subscription records (data/billing.json)
 public/js/main.js          renderer, game loop, floors, elevator rides, polling, actions
 public/js/permissions.js   which buttons the viewer gets, from their GitHub permissions
 public/js/world/*          building, furniture, characters, repo floor, lobby, canvas screens
-public/js/ui/*             HUD, panels, Kanban, phone, manager console, title screen
+public/js/ui/*             HUD, panels, Kanban, phone, manager console, title screen, plan card
 ```
 
 Rendering is Three.js with toon materials and an outline pass. Static furniture is merged into a handful of draw
@@ -145,10 +176,8 @@ Security details are in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- **Subscriptions.** An owner subscribes, installs the GitHub App on their organization and gets the building link to
-  share. Plans limit how many organizations an owner can connect (Basic: one). Planned pieces: a workspace registry
-  (org ↔ owner ↔ plan ↔ app installation) in a database instead of `data/config.json`, checkout and billing webhooks,
-  and GitHub App webhooks so uninstalls and membership removals take effect instantly.
+- **Subscriptions, next steps.** Bigger plans (more organizations), GitHub App webhooks so uninstalls and membership
+  removals take effect instantly, and moving subscription records to Postgres when running more than one instance.
 - **Character customization.** People who sign in with their own GitHub account can design the character that
   represents them (hair, colors, accessories). Profiles will be keyed by GitHub user id and editable only by that
   person, from a "Me" app on the phone.
