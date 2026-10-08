@@ -28,5 +28,16 @@ requires a custom header plus same origin on every write (CSRF protection). Don'
 - All GitHub content is rendered as text (no `innerHTML`); external links must be `https://`.
 - The unauthenticated demo runs in a private in-memory sandbox per visitor with size limits.
 
+**Subscriptions (Stripe):**
+
+- Card details never touch this server: people pay on Stripe Checkout and manage billing in Stripe's customer portal.
+  The Stripe secret key stays server-side.
+- The webhook (`/stripe/webhook`) only accepts requests with a valid `Stripe-Signature` (HMAC-SHA256, constant-time
+  compare, 5-minute replay window). Events are de-duplicated, and subscription changes are re-read from Stripe rather
+  than trusted from the event body, so out-of-order or forged payloads can't open a building.
+- Returning from Checkout, the payment is confirmed with Stripe directly, and only for the signed-in person who
+  started that checkout.
+- Only organization owners can connect an organization to a subscription; plan limits are enforced on the server.
+
 Known limits: sessions are in memory (one instance; everyone signs in again after a restart), and there's no
 audit log yet.

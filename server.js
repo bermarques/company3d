@@ -24,6 +24,9 @@ const { getConfig, setConnection, fileSettingsStore, memorySettingsStore } = awa
 const { createSessionStore } = await import('./server/sessions.js');
 const { createAuth } = await import('./server/auth.js');
 const { rateLimiter, clientIp, inlineScriptHashes, contentSecurityPolicy, baseSecurityHeaders } = await import('./server/security.js');
+const { createStore } = await import('./server/store.js');
+const { createStripe } = await import('./server/stripe.js');
+const { createBilling, PLAN } = await import('./server/billing.js');
 
 const PUBLIC = path.join(ROOT, 'public');
 const THREE_DIR = path.join(ROOT, 'node_modules', 'three');
@@ -72,6 +75,34 @@ const auth = HOSTED
       secure: SECURE,
     })
   : null;
+
+// ---------------------------------------------------------------- subscriptions (hosted mode, optional)
+// With Stripe configured, a building only opens for organizations connected to an active subscription.
+const billingVars = ['STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID', 'STRIPE_WEBHOOK_SECRET'];
+const billingSet = billingVars.filter((k) => env[k]);
+if (billingSet.length && billingSet.length < billingVars.length) {
+  console.error(`\n  Subscriptions need all of ${billingVars.join(', ')} (missing: ${billingVars.filter((k) => !env[k]).join(', ')}).\n`);
+  process.exit(1);
+}
+if (billingSet.length && !/^price_[A-Za-z0-9]+$/.test(env.STRIPE_PRICE_ID)) {
+  console.error('\n  STRIPE_PRICE_ID should look like price_123... (the Price ID of your plan in Stripe, not the product ID).\n');
+  process.exit(1);
+}
+const COMPLIMENTARY_ORGS = (env.COMPLIMENTARY_ORGS || '')
+  .split(',')
+  .map((x) => x.trim())
+  .filter(Boolean);
+const billing =
+  HOSTED && billingSet.length
+    ? createBilling({
+        store: createStore(path.resolve(env.DATA_DIR || 'data', 'billing.json')),
+        stripe: createStripe(env.STRIPE_SECRET_KEY),
+        priceId: env.STRIPE_PRICE_ID,
+        webhookSecret: env.STRIPE_WEBHOOK_SECRET,
+        publicUrl: ORIGIN,
+        complimentary: COMPLIMENTARY_ORGS,
+      })
+    : null;
 
 // ---------------------------------------------------------------- local-mode state (gh CLI)
 let gh = { installed: false, authed: false };
@@ -146,6 +177,22 @@ function readBody(req) {
   });
 }
 
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new HttpError(413, 'Request body too large'));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function need(value, re, what) {
   if (typeof value !== 'string' || !re.test(value)) throw new HttpError(400, `Invalid ${what}`);
   return value;
@@ -197,12 +244,40 @@ async function accessFor(ctx, owner, fresh = false) {
 async function requireOrg(ctx) {
   requireSession(ctx);
   if (!ctx.owner) throw new HttpError(409, 'No GitHub organization selected yet', { noOrg: true });
-  const access = await accessFor(ctx, ctx.owner);
+  let access = await accessFor(ctx, ctx.owner);
   if (access.role === 'none') {
     if (ctx.session) ctx.session.org = null;
     throw new HttpError(403, `You're not a member of ${ctx.owner} on GitHub`, { noOrg: true });
   }
+  if (billing && ctx.session && ctx.session.kind === 'user') {
+    // your own personal building is a bonus while one of your organizations is subscribed
+    const personal = access.role === 'owner' ? { memberOf: await memberOrgs(ctx) } : undefined;
+    const ent = billing.entitlement(ctx.owner, personal);
+    if (!ent.ok) {
+      const message =
+        ent.reason === 'inactive'
+          ? `${ctx.owner}'s Company3D subscription isn't active. Ask @${ent.ownerLogin} to renew it.`
+          : access.canManage
+            ? `${ctx.owner} isn't on Company3D yet. Subscribe and connect it to open the building.`
+            : `${ctx.owner} isn't on Company3D yet. Ask one of its owners to subscribe.`;
+      throw new HttpError(402, message, { needsSubscription: true });
+    }
+    access = { ...access, billing: { pastDue: !!ent.pastDue, bonus: !!ent.bonus, via: ent.via || null, complimentary: !!ent.complimentary } };
+  }
   return access;
+}
+
+/** Organizations the viewer belongs to (cached). */
+async function memberOrgs(ctx) {
+  const owners = await cached(`${ctx.ns}:owners`, 60_000, () => ctx.provider.listOwners());
+  return owners.filter((o) => o.type === 'Organization').map((o) => o.login);
+}
+
+function requireSubscriber(ctx) {
+  if (!billing) throw new HttpError(404, 'Subscriptions are not enabled on this server');
+  requireSession(ctx);
+  if (ctx.session.kind !== 'user') throw new HttpError(403, 'Sign in with GitHub to manage a subscription');
+  return ctx.session.user;
 }
 
 async function getWorld(ctx, fresh = false) {
@@ -226,6 +301,7 @@ function statusPayload(ctx) {
       viewer: ctx.viewer || null,
       owner: ctx.owner || null,
       installUrl: env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new` : null,
+      billing: !!billing,
     };
   }
   const cfg = getConfig();
@@ -284,7 +360,17 @@ route('GET', '/api/owners', async ({ ctx }) => {
   }
   requireSession(ctx);
   const owners = await cached(`${ctx.ns}:owners`, 60_000, () => ctx.provider.listOwners());
-  return owners.filter((o) => orgAllowed(o.login) || ctx.session.kind === 'demo');
+  const visible = owners.filter((o) => orgAllowed(o.login) || ctx.session.kind === 'demo');
+  if (!billing || ctx.session.kind !== 'user') return visible;
+  // tell the title screen which buildings are open, and which ones this person could connect
+  const me = ctx.session.user;
+  const orgs = visible.filter((o) => o.type === 'Organization').map((o) => o.login);
+  return visible.map((o) => {
+    const personal = o.type === 'User' && o.login.toLowerCase() === me.login.toLowerCase() ? { memberOf: orgs } : undefined;
+    const ent = billing.entitlement(o.login, personal);
+    const ws = billing.workspace(o.login);
+    return { ...o, building: { open: ent.ok, bonus: !!ent.bonus, via: ent.via || null, reason: ent.reason || null, connectedByMe: !!ws && ws.ownerId === String(me.id), connectedBy: ws ? ws.ownerLogin : null } };
+  });
 });
 
 route('POST', '/api/connect', async ({ ctx, body }) => {
@@ -305,6 +391,46 @@ route('POST', '/api/connect', async ({ ctx, body }) => {
   ctx.session.org = owner;
   return statusPayload(contextFor(ctx.req));
 });
+
+// ---- subscriptions
+route('GET', '/api/billing', async ({ ctx }) => {
+  const user = requireSubscriber(ctx);
+  return billing.summary(user);
+}, { local: false });
+route('POST', '/api/billing/checkout', async ({ ctx }) => {
+  const user = requireSubscriber(ctx);
+  return billing.checkout(user);
+}, { local: false });
+route('POST', '/api/billing/confirm', async ({ ctx, body }) => {
+  const user = requireSubscriber(ctx);
+  return billing.confirm(user, body.sessionId);
+}, { local: false });
+route('POST', '/api/billing/portal', async ({ ctx }) => {
+  const user = requireSubscriber(ctx);
+  return billing.portal(user);
+}, { local: false });
+route(
+  'POST',
+  '/api/workspaces',
+  async ({ ctx, body }) => {
+    const user = requireSubscriber(ctx);
+    const org = need(body.org, OWNER_RE, 'organization');
+    if (!orgAllowed(org)) throw new HttpError(403, `This Company3D server isn't set up for ${org}`);
+    const result = await billing.connect(user, org, ctx.provider);
+    invalidate(`${ctx.ns}:${org}:access`);
+    return result;
+  },
+  { local: false },
+);
+route(
+  'DELETE',
+  '/api/workspaces/:org',
+  async ({ ctx, params }) => {
+    const user = requireSubscriber(ctx);
+    return billing.disconnect(user, need(params.org, OWNER_RE, 'organization'));
+  },
+  { local: false },
+);
 
 route('GET', '/api/world', async ({ ctx, query }) => {
   const access = await requireOrg(ctx);
@@ -504,6 +630,25 @@ async function handle(req, res) {
     return send(res, 404, 'not found');
   }
 
+  // ---- Stripe webhook
+  if (pathname === '/stripe/webhook') {
+    if (!billing || req.method !== 'POST') return send(res, 404, 'not found');
+    let raw;
+    try {
+      raw = await readRaw(req, 1_000_000);
+    } catch (e) {
+      return send(res, e.status || 400, { error: e.message });
+    }
+    try {
+      await billing.webhook(raw, req.headers['stripe-signature']);
+      return send(res, 200, { received: true });
+    } catch (e) {
+      if (e.status === 400) return send(res, 400, { error: e.message });
+      console.error('[stripe webhook]', e.message);
+      return send(res, 500, { error: 'Webhook processing failed' }); // Stripe will retry
+    }
+  }
+
   // ---- API
   if (pathname.startsWith('/api/')) {
     const write = req.method !== 'GET';
@@ -571,6 +716,7 @@ function sendError(res, ctx, req, pathname, e) {
   const body = { error: message };
   if (e.signedOut) body.signedOut = true;
   if (e.noOrg) body.noOrg = true;
+  if (e.needsSubscription) body.needsSubscription = true;
   return send(res, status, body);
 }
 
@@ -595,6 +741,10 @@ server.listen(PORT, HOST, () => {
     console.log(`\n  🏢  Company3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
     console.log(`  Sign-in callback URL: ${ORIGIN}/auth/callback`);
     if (ALLOWED_ORGS.length) console.log(`  Restricted to organizations: ${ALLOWED_ORGS.join(', ')}`);
+    if (billing) {
+      console.log(`  Subscriptions: on (${PLAN.name}, ${env.STRIPE_SECRET_KEY.startsWith('sk_live_') ? 'LIVE' : 'test'} mode). Stripe webhook: ${ORIGIN}/stripe/webhook`);
+      if (COMPLIMENTARY_ORGS.length) console.log(`  Free organizations: ${COMPLIMENTARY_ORGS.join(', ')}`);
+    } else console.log('  Subscriptions: off (every organization member can open its building).');
     if (!SECURE) console.log('  ⚠️  PUBLIC_URL is not https — fine for local testing, never for production.');
     console.log('');
     return;

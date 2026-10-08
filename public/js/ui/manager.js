@@ -8,6 +8,7 @@ import { timeAgo, makeCanvas } from '../engine/canvas.js';
 import { drawRepoMap } from '../world/screens.js';
 import { can, roleLabel } from '../permissions.js';
 import { shareBox, signOut } from './start.js';
+import { planCard } from './billing.js';
 
 const TABS = [
   ['floors', '📁 Repos & floors'],
@@ -285,6 +286,8 @@ function hostedOrgTab(app) {
     null,
     h('div', { class: 'row space' }, h('p', null, 'Signed in as ', h('strong', null, `@${app.viewerLogin()}`), ` · ${roleLabel(app)} of ${app.world.owner.login}`), h('button', { class: 'btn ghost', onClick: signOut }, 'Sign out')),
     shareBox(app.world.owner.login),
+    s.billing ? h('h3', null, 'Plan & billing') : null,
+    s.billing ? planCard({ compact: true }) : null,
     h('h3', null, 'Your buildings'),
     owners,
     s.installUrl && can.manage(app) ? h('p', { class: 'muted small' }, 'Add another organization by ', h('a', { href: s.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'installing the Company3D GitHub App'), ' on it.') : null,

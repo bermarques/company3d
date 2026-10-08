@@ -24,6 +24,7 @@ async function req(method, url, body) {
     err.status = res.status;
     err.signedOut = !!(data && data.signedOut);
     err.noOrg = !!(data && data.noOrg);
+    err.needsSubscription = !!(data && data.needsSubscription);
     if (err.signedOut) onSignedOut(err);
     throw err;
   }
@@ -50,4 +51,10 @@ export const api = {
   updateIssue: (repo, number, patch) => req('PATCH', `/api/issues/${enc(repo)}/${number}`, patch),
   mergePR: (repo, number, method = 'squash') => req('POST', `/api/prs/${enc(repo)}/${number}/merge`, { method }),
   avatarUrl: (login) => `/api/avatar/${enc(login)}`,
+  billing: () => req('GET', '/api/billing'),
+  billingCheckout: () => req('POST', '/api/billing/checkout', {}),
+  billingConfirm: (sessionId) => req('POST', '/api/billing/confirm', { sessionId }),
+  billingPortal: () => req('POST', '/api/billing/portal', {}),
+  connectWorkspace: (org) => req('POST', '/api/workspaces', { org }),
+  disconnectWorkspace: (org) => req('DELETE', `/api/workspaces/${enc(org)}`, {}),
 };

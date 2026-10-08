@@ -14,6 +14,7 @@ import { openDevPanel, openBoardPanel, openElevatorPanel, openRepoInfo, openRobo
 import { openManagerConsole } from './ui/manager.js';
 import { renderStart, hideStart, controlsList, orgFromPath, signOut } from './ui/start.js';
 import { createPhone } from './ui/phone.js';
+import { billingReturnNotice } from './ui/billing.js';
 
 // ------------------------------------------------------------------ renderer & scene
 const canvas = document.getElementById('scene');
@@ -564,6 +565,8 @@ async function boot() {
     return;
   }
 
+  const notice = status.hosted && status.user ? await billingReturnNotice() : null;
+
   // A building link (/o/<org>) opens that organization, as long as GitHub says you belong to it.
   let connectError = null;
   const linkOrg = orgFromPath();
@@ -598,6 +601,7 @@ async function boot() {
 
   const startOptions = {
     error: connectError,
+    notice,
     onReload: () => location.reload(),
     onEnter: async () => {
       player.lock(); // must happen inside the click
@@ -609,7 +613,7 @@ async function boot() {
         hud.loading(null);
         player.unlock();
         // keep the reason on the title screen (e.g. a missing GitHub App permission), not just in a toast
-        renderStart(status, { ...startOptions, error: `Couldn't open the building: ${e.message}` });
+        renderStart(status, { ...startOptions, error: `Couldn't open the building: ${e.message}`, needsSubscription: e.needsSubscription });
         if (!status.hosted) hud.toast(`Couldn't load the organization: ${e.message}`, 'error', 9000);
         return;
       }
@@ -622,14 +626,23 @@ async function boot() {
       if (app.isDemo) hud.toast(status.hosted ? '🎭 Demo company with fictional data. Sign in with GitHub to see your real org.' : '🎭 Demo company with fictional data. Connect the GitHub CLI to see your real org.', 'info', 7000);
       hud.toast('👋 Take the elevator (behind you) to visit a repo — or walk east to the Manager\'s Office.', 'info', 8000);
       announceEmptyBuilding();
+      announceBilling();
     },
   };
   renderStart(status, startOptions);
   if (worldPromise && status.hosted) {
     worldPromise.catch((e) => {
-      if (!entered) renderStart(status, { ...startOptions, error: `Couldn't open the building: ${e.message}` });
+      if (!entered) renderStart(status, { ...startOptions, error: e.needsSubscription ? e.message : `Couldn't open the building: ${e.message}`, needsSubscription: e.needsSubscription });
     });
   }
+}
+
+/** Subscription news worth saying out loud when you walk in. */
+function announceBilling() {
+  const b = app.world.access && app.world.access.billing;
+  if (!b) return;
+  if (b.pastDue && app.world.access.canManage) hud.toast("⚠️ The last payment for this building failed. It stays open while Stripe retries. Update the card from the title screen's plan card.", 'warn', 12000);
+  if (b.bonus) hud.toast(`🎁 Your personal building is free thanks to ${b.via}'s Company3D plan.`, 'success', 8000);
 }
 
 /** A building with no floors looks broken, so say why. */
