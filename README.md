@@ -189,3 +189,6 @@ Security details are in [SECURITY.md](SECURITY.md).
 - **Character customization.** People who sign in with their own GitHub account can design the character that
   represents them (hair, colors, accessories). Profiles will be keyed by GitHub user id and editable only by that
   person, from a "Me" app on the phone.
+- **Multiplayer.** In shared buildings (organizations), people see the other players who are connected at the same
+  time. Personal buildings stay offline (single-player). When a player enters a floor, their NPC is removed from it,
+  so each person appears only once.
