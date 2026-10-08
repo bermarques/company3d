@@ -116,7 +116,7 @@ export function buildingButton(o, { current, summary }) {
   }
   const sub = summary && summary.subscription;
   let action = null;
-  let note = o.type === 'User' ? 'Free when one of your organizations subscribes' : 'Not on Company3D yet';
+  let note = o.type === 'User' ? 'Free when one of your organizations subscribes' : 'Not on Worktown3D yet';
   if (b.reason === 'inactive') note = `Plan of @${b.connectedBy} isn't active`;
   if (sub && sub.active && summary.slotsLeft > 0) {
     action = h('button', { class: 'btn small primary' }, 'Connect');

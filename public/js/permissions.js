@@ -20,7 +20,7 @@ export const can = {
   /** assign / unassign / close issues, set labels and assignees on new issues */
   triage: (app, repo) => rank(app, repo) >= RANK.TRIAGE,
   merge: (app, repo) => rank(app, repo) >= RANK.WRITE,
-  /** floors, order and repo connections (Company3D's own settings) */
+  /** floors, order and repo connections (Worktown3D's own settings) */
   manage: (app) => !!(app.world && app.world.access && app.world.access.canManage),
   createRepo: (app) => !!(app.world && app.world.access && app.world.access.canCreateRepo),
 };

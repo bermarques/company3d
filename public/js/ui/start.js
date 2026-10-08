@@ -129,7 +129,7 @@ export function renderStart(status, { onEnter, onReload, error, notice, needsSub
 }
 
 function titleBlock() {
-  return h('div', { class: 'start-title' }, h('div', { class: 'logo' }, '🏢'), h('div', null, h('h1', null, 'Company3D'), h('p', null, 'Walk around your GitHub organization. One floor per repo, every dev at their laptop.')));
+  return h('div', { class: 'start-title' }, h('div', { class: 'logo' }, '🏢'), h('div', null, h('h1', null, 'Worktown3D'), h('p', null, 'Walk around your GitHub organization. One floor per repo, every dev at their laptop.')));
 }
 
 /** /o/<org> in the address bar: a building link someone shared. */
@@ -231,7 +231,7 @@ function hostedStart(status, { onEnter, onReload, error, notice, needsSubscripti
               owners.map((o) => buildingButton(o, { current: status.owner, summary })),
             )
           : h('p', { class: 'muted' }, 'No organizations available yet.'),
-        status.installUrl ? h('p', { class: 'muted small' }, "Don't see your organization? An owner needs to ", h('a', { href: status.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'install the Company3D GitHub App'), ' on it.') : null,
+        status.installUrl ? h('p', { class: 'muted small' }, "Don't see your organization? An owner needs to ", h('a', { href: status.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'install the Worktown3D GitHub App'), ' on it.') : null,
       );
     } catch (e) {
       picker.replaceChildren(h('p', { class: 'error' }, e.message));

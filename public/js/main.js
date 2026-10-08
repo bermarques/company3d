@@ -1,4 +1,4 @@
-// Company3D client entry: renderer, game loop, floor management, elevator rides, live polling and actions.
+// Worktown3D client entry: renderer, game loop, floor management, elevator rides, live polling and actions.
 import * as THREE from 'three';
 import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import { api, setSignedOutHandler } from './api.js';
@@ -64,7 +64,7 @@ const player = new Player(camera, canvas);
 const interactor = new Interactor(camera);
 
 // ------------------------------------------------------------------ settings (phone ⚙️, remembered per browser)
-const SETTINGS_KEY = 'company3d.settings';
+const SETTINGS_KEY = 'worktown3d.settings';
 const DEFAULT_SETTINGS = { sensitivity: 1, fov: 70, nameTags: true, shadows: true, outlines: true, sound: true };
 function loadSettings() {
   try {
@@ -171,7 +171,7 @@ const app = {
     return canvas.toDataURL('image/jpeg', 0.92);
   },
 };
-window.company3d = { app, player, camera }; // handy for debugging in the console
+window.worktown3d = { app, player, camera }; // handy for debugging in the console
 
 // Phone lookups can hit every floor at once; keep the local server (and gh) to a few requests at a time.
 const floorLoadedAt = new Map();
@@ -218,7 +218,7 @@ function mountFloor(index, data, { arriveInElevator = false, keepPosition = fals
 
   const owner = app.world.owner.login;
   hud.setFloor(floor.floorLabel, index ? `${owner}/${data.repo.name}` : `${owner} · Lobby & Manager's Office`);
-  document.title = index ? `${floor.floorLabel} ${data.repo.name} · Company3D` : `${owner} · Company3D`;
+  document.title = index ? `${floor.floorLabel} ${data.repo.name} · Worktown3D` : `${owner} · Worktown3D`;
 }
 
 async function loadFloorData(repo, fresh = false, { quiet = false } = {}) {
@@ -561,7 +561,7 @@ async function boot() {
     status = await api.status();
   } catch (e) {
     document.getElementById('start').classList.add('show');
-    document.getElementById('start').replaceChildren(h('div', { class: 'start-card' }, h('h1', null, 'Company3D'), h('p', { class: 'error' }, `Can't reach the server: ${e.message}`), h('p', null, 'Make sure it is running and reload.')));
+    document.getElementById('start').replaceChildren(h('div', { class: 'start-card' }, h('h1', null, 'Worktown3D'), h('p', { class: 'error' }, `Can't reach the server: ${e.message}`), h('p', null, 'Make sure it is running and reload.')));
     return;
   }
 
@@ -642,7 +642,7 @@ function announceBilling() {
   const b = app.world.access && app.world.access.billing;
   if (!b) return;
   if (b.pastDue && app.world.access.canManage) hud.toast("⚠️ The last payment for this building failed. It stays open while Stripe retries. Update the card from the title screen's plan card.", 'warn', 12000);
-  if (b.bonus) hud.toast(`🎁 Your personal building is free thanks to ${b.via}'s Company3D plan.`, 'success', 8000);
+  if (b.bonus) hud.toast(`🎁 Your personal building is free thanks to ${b.via}'s Worktown3D plan.`, 'success', 8000);
 }
 
 /** A building with no floors looks broken, so say why. */

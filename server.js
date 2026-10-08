@@ -1,12 +1,9 @@
-// Company3D server: serves the 3D client and a small JSON API backed by GitHub.
-//
-// Two modes:
-//  - Local (default): acts as you through the GitHub CLI (`gh`). Listens on localhost only.
-//  - Hosted (GITHUB_CLIENT_ID + GITHUB_CLIENT_SECRET + PUBLIC_URL set): everyone signs in with GitHub and every
-//    GitHub call uses *their own* token, so GitHub enforces what each person can see and do. `gh` is never used.
+// Worktown3D web app: serves the 3D client and proxies /api, /auth and /stripe to the Worktown3D API
+// (API_URL), so the browser only ever talks to this origin.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -16,574 +13,70 @@ try {
   /* no .env file: use the real environment */
 }
 
-const { detectGh } = await import('./server/gh.js');
-const { cliClient, createTokenClient, GhError } = await import('./server/github-client.js');
-const { createGithubProvider, fetchAvatar } = await import('./server/github-provider.js');
-const { createDemoProvider } = await import('./server/demo-provider.js');
-const { getConfig, setConnection, localSettings } = await import('./server/config.js');
-const { createSettings, memorySettings } = await import('./server/settings.js');
-const { connectDatabase } = await import('./server/db.js');
-const { createPgRepo } = await import('./server/repo.js');
-const { createSessionStore } = await import('./server/sessions.js');
-const { createAuth } = await import('./server/auth.js');
-const { rateLimiter, clientIp, inlineScriptHashes, contentSecurityPolicy, baseSecurityHeaders } = await import('./server/security.js');
-const { createStripe } = await import('./server/stripe.js');
-const { createBilling, PLAN } = await import('./server/billing.js');
-
+const env = process.env;
 const PUBLIC = path.join(ROOT, 'public');
 const THREE_DIR = path.join(ROOT, 'node_modules', 'three');
 const INDEX = path.join(PUBLIC, 'index.html');
-const PORT = Number(process.env.PORT) || 3000;
-const FORCE_DEMO = process.argv.includes('--demo');
-const DEFAULT_FLOOR_COUNT = 15;
+const PORT = Number(env.PORT) || 3000;
 
-const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
-const REPO_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
-const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
-
-// ---------------------------------------------------------------- mode
-const env = process.env;
-const hostedVars = ['GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'PUBLIC_URL'];
-const hostedSet = hostedVars.filter((k) => env[k]);
-if (hostedSet.length && hostedSet.length < hostedVars.length) {
-  console.error(`\n  Hosted mode needs all of ${hostedVars.join(', ')} (missing: ${hostedVars.filter((k) => !env[k]).join(', ')}).\n`);
+function fail(message) {
+  console.error(`\n  ${message}\n`);
   process.exit(1);
 }
-const HOSTED = hostedSet.length === hostedVars.length;
-const PUBLIC_URL = HOSTED ? new URL(env.PUBLIC_URL) : null;
-if (PUBLIC_URL && (PUBLIC_URL.pathname !== '/' || PUBLIC_URL.search || PUBLIC_URL.hash)) {
-  console.error('\n  PUBLIC_URL must be just an origin, like https://company3d.example.com\n');
-  process.exit(1);
-}
-const SECURE = HOSTED && PUBLIC_URL.protocol === 'https:';
-const HOST = env.HOST || (HOSTED ? '0.0.0.0' : '127.0.0.1');
-const TRUST_PROXY = env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true';
-const ALLOWED_ORGS = (env.ALLOWED_ORGS || '')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
 
-const ORIGIN = HOSTED ? PUBLIC_URL.origin : null;
+function parseUrl(value) {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+const PUBLIC_URL = env.PUBLIC_URL ? parseUrl(env.PUBLIC_URL) : null;
+if (env.PUBLIC_URL && (!PUBLIC_URL || !/^https?:$/.test(PUBLIC_URL.protocol) || PUBLIC_URL.pathname !== '/' || PUBLIC_URL.search || PUBLIC_URL.hash)) {
+  fail('PUBLIC_URL must be just an origin, like https://worktown3d.example.com');
+}
+const API = parseUrl(env.API_URL || 'http://127.0.0.1:3001');
+if (!API || API.protocol !== 'http:' || API.pathname !== '/' || API.search || API.username || API.password) {
+  fail('API_URL must be the API\'s plain http:// origin, like http://127.0.0.1:3001');
+}
+const HOSTED = !!PUBLIC_URL;
+const HOST = env.HOST || (HOSTED ? undefined : '127.0.0.1');
 const ALLOWED_HOSTS = new Set(HOSTED ? [PUBLIC_URL.host] : [`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 
-const sessions = HOSTED ? createSessionStore({ secure: SECURE }) : null;
-const auth = HOSTED
-  ? createAuth({
-      publicUrl: ORIGIN,
-      clientId: env.GITHUB_CLIENT_ID,
-      clientSecret: env.GITHUB_CLIENT_SECRET,
-      scopes: env.GITHUB_OAUTH_SCOPES ?? 'read:org repo',
-      sessions,
-      secure: SECURE,
-    })
-  : null;
-
-// ---------------------------------------------------------------- database (hosted mode)
-if (HOSTED && !env.DATABASE_URL) {
-  console.error('\n  Hosted mode needs DATABASE_URL (a PostgreSQL connection string).\n');
-  process.exit(1);
-}
-let pool = null;
-if (HOSTED) {
-  try {
-    pool = await connectDatabase(env.DATABASE_URL);
-  } catch (e) {
-    console.error(`\n  Could not connect to the database: ${e.message}\n`);
-    process.exit(1);
+function inlineScriptHashes(htmlFile) {
+  const html = fs.readFileSync(htmlFile, 'utf8');
+  const hashes = [];
+  for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    hashes.push(`'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
   }
-}
-const settingsFor = HOSTED ? createSettings(pool) : localSettings;
-
-// ---------------------------------------------------------------- subscriptions (hosted mode, optional)
-const billingVars = ['STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID', 'STRIPE_WEBHOOK_SECRET'];
-const billingSet = billingVars.filter((k) => env[k]);
-if (billingSet.length && billingSet.length < billingVars.length) {
-  console.error(`\n  Subscriptions need all of ${billingVars.join(', ')} (missing: ${billingVars.filter((k) => !env[k]).join(', ')}).\n`);
-  process.exit(1);
-}
-if (billingSet.length && !/^price_[A-Za-z0-9]+$/.test(env.STRIPE_PRICE_ID)) {
-  console.error('\n  STRIPE_PRICE_ID should look like price_123... (the Price ID of your plan in Stripe, not the product ID).\n');
-  process.exit(1);
-}
-const COMPLIMENTARY_ORGS = (env.COMPLIMENTARY_ORGS || '')
-  .split(',')
-  .map((x) => x.trim())
-  .filter(Boolean);
-const billing =
-  HOSTED && billingSet.length
-    ? createBilling({
-        repo: createPgRepo(pool),
-        stripe: createStripe(env.STRIPE_SECRET_KEY),
-        priceId: env.STRIPE_PRICE_ID,
-        webhookSecret: env.STRIPE_WEBHOOK_SECRET,
-        publicUrl: ORIGIN,
-        complimentary: COMPLIMENTARY_ORGS,
-      })
-    : null;
-
-// ---------------------------------------------------------------- local-mode state (gh CLI)
-let gh = { installed: false, authed: false };
-const localDemo = createDemoProvider();
-let localProvider = localDemo;
-
-function selectLocalProvider() {
-  const cfg = getConfig();
-  localProvider = !FORCE_DEMO && !cfg.demo && gh.authed ? createGithubProvider({ client: cliClient, viewer: gh.user }) : localDemo;
-  cache.clear();
+  return hashes;
 }
 
-// ---------------------------------------------------------------- cache (namespaced per viewer)
-const cache = new Map();
-const MAX_CACHE = 5000;
-function cached(key, ttlMs, fn, fresh = false) {
-  const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < ttlMs) return hit.promise;
-  if (cache.size > MAX_CACHE) for (const k of [...cache.keys()].slice(0, 1000)) cache.delete(k);
-  const promise = fn();
-  cache.set(key, { at: Date.now(), promise });
-  promise.catch(() => cache.delete(key));
-  return promise;
-}
-function invalidate(prefix) {
-  for (const k of cache.keys()) if (k.startsWith(prefix)) cache.delete(k);
-}
+const CSP = [
+  "default-src 'self'",
+  `script-src 'self' ${inlineScriptHashes(INDEX).join(' ')}`,
+  "style-src 'self' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  "img-src 'self' data: blob:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+].join('; ');
 
-// ---------------------------------------------------------------- helpers
-class HttpError extends Error {
-  constructor(status, message, extra = {}) {
-    super(message);
-    this.status = status;
-    Object.assign(this, extra);
-  }
-}
-
-const securityHeaders = baseSecurityHeaders({ https: SECURE });
-const CSP = contentSecurityPolicy(inlineScriptHashes(INDEX));
-
-function send(res, status, body, headers = {}) {
-  const isJson = typeof body === 'object' && !Buffer.isBuffer(body);
-  res.writeHead(status, {
-    'Content-Type': isJson ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store',
-    ...headers,
-  });
-  res.end(isJson ? JSON.stringify(body) : body);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > 200_000) {
-        reject(new HttpError(413, 'Request body too large'));
-        req.destroy();
-      } else chunks.push(c);
-    });
-    req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
-      } catch {
-        reject(new HttpError(400, 'Invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-function readRaw(req, limit) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > limit) {
-        reject(new HttpError(413, 'Request body too large'));
-        req.destroy();
-      } else chunks.push(c);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
-
-function need(value, re, what) {
-  if (typeof value !== 'string' || !re.test(value)) throw new HttpError(400, `Invalid ${what}`);
-  return value;
-}
-
-const list = (v, max = 20) => (Array.isArray(v) ? v.slice(0, max) : []);
-const orgAllowed = (owner) => !ALLOWED_ORGS.length || ALLOWED_ORGS.includes(owner.toLowerCase());
-
-// ---------------------------------------------------------------- request context
-/**
- * Everything a request needs: who is asking (provider acting as them), which building, and where its
- * settings live. Cache keys are namespaced per viewer so one person's private data never reaches another.
- */
-function contextFor(req) {
-  if (!HOSTED) {
-    const owner = localProvider.mode === 'demo' ? 'demo-co' : getConfig().owner;
-    return {
-      session: null,
-      provider: localProvider,
-      ns: localProvider.mode,
-      owner,
-      viewer: localProvider.viewer,
-      settings: owner ? settingsFor(owner) : null,
-    };
-  }
-  const s = sessions.get(req);
-  if (!s) return { session: null, provider: null };
-  if (s.kind === 'demo') {
-    s.provider = s.provider || createDemoProvider();
-    s.demoSettings = s.demoSettings || memorySettings();
-    return { session: s, provider: s.provider, ns: `d:${s.id}`, owner: 'demo-co', viewer: s.provider.viewer, settings: s.demoSettings };
-  }
-  s.provider = s.provider || createGithubProvider({ client: createTokenClient(() => auth.validToken(s)), viewer: s.user });
-  return { session: s, provider: s.provider, ns: `u:${s.user.id}`, owner: s.org, viewer: s.user, settings: s.org ? settingsFor(s.org) : null };
-}
-
-function requireSession(ctx) {
-  if (!ctx.provider) throw new HttpError(401, 'Please sign in with GitHub', { signedOut: true });
-}
-
-/** Is the viewer allowed into this building, and as what? Re-checked every few minutes so people who leave lose access. */
-async function accessFor(ctx, owner, fresh = false) {
-  if (!orgAllowed(owner) && !(ctx.session && ctx.session.kind === 'demo')) {
-    throw new HttpError(403, `This Company3D server isn't set up for ${owner}`);
-  }
-  return cached(`${ctx.ns}:${owner}:access`, 5 * 60_000, () => ctx.provider.access(owner), fresh);
-}
-
-async function requireOrg(ctx) {
-  requireSession(ctx);
-  if (!ctx.owner) throw new HttpError(409, 'No GitHub organization selected yet', { noOrg: true });
-  let access = await accessFor(ctx, ctx.owner);
-  if (access.role === 'none') {
-    if (ctx.session) ctx.session.org = null;
-    throw new HttpError(403, `You're not a member of ${ctx.owner} on GitHub`, { noOrg: true });
-  }
-  if (billing && ctx.session && ctx.session.kind === 'user') {
-    const personal = access.role === 'owner' ? { memberOf: await memberOrgs(ctx) } : undefined;
-    const ent = await billing.entitlement(ctx.owner, personal);
-    if (!ent.ok) {
-      const message =
-        ent.reason === 'inactive'
-          ? `${ctx.owner}'s Company3D subscription isn't active. Ask @${ent.ownerLogin} to renew it.`
-          : access.canManage
-            ? `${ctx.owner} isn't on Company3D yet. Subscribe and connect it to open the building.`
-            : `${ctx.owner} isn't on Company3D yet. Ask one of its owners to subscribe.`;
-      throw new HttpError(402, message, { needsSubscription: true });
-    }
-    access = { ...access, billing: { pastDue: !!ent.pastDue, bonus: !!ent.bonus, via: ent.via || null, complimentary: !!ent.complimentary } };
-  }
-  return access;
-}
-
-/** Organizations the viewer belongs to (cached). */
-async function memberOrgs(ctx) {
-  const owners = await cached(`${ctx.ns}:owners`, 60_000, () => ctx.provider.listOwners());
-  return owners.filter((o) => o.type === 'Organization').map((o) => o.login);
-}
-
-function requireSubscriber(ctx) {
-  if (!billing) throw new HttpError(404, 'Subscriptions are not enabled on this server');
-  requireSession(ctx);
-  if (ctx.session.kind !== 'user') throw new HttpError(403, 'Sign in with GitHub to manage a subscription');
-  return ctx.session.user;
-}
-
-async function getWorld(ctx, fresh = false) {
-  return cached(`${ctx.ns}:${ctx.owner}:world`, 120_000, () => ctx.provider.getWorld(ctx.owner), fresh);
-}
-
-async function floorsFor(ctx, world) {
-  const settings = await ctx.settings.get();
-  const names = new Set(world.repos.map((r) => r.name));
-  if (settings.floors) return settings.floors.filter((n) => names.has(n));
-  return world.repos.filter((r) => !r.isArchived).slice(0, DEFAULT_FLOOR_COUNT).map((r) => r.name);
-}
-
-function statusPayload(ctx) {
-  if (HOSTED) {
-    const s = ctx.session;
-    return {
-      hosted: true,
-      mode: s ? (s.kind === 'demo' ? 'demo' : 'github') : null,
-      user: s && s.kind === 'user' ? s.user : null,
-      viewer: ctx.viewer || null,
-      owner: ctx.owner || null,
-      installUrl: env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new` : null,
-      billing: !!billing,
-    };
-  }
-  const cfg = getConfig();
-  return {
-    hosted: false,
-    mode: localProvider.mode,
-    forcedDemo: FORCE_DEMO,
-    chosenDemo: !!cfg.demo,
-    gh: { installed: gh.installed, authed: gh.authed, version: gh.version || null, user: gh.user || null, error: gh.error || null },
-    viewer: localProvider.viewer,
-    owner: ctx.owner,
-  };
-}
-
-// ---------------------------------------------------------------- API routes
-const routes = [];
-const route = (method, pattern, handler, { local = true, hosted = true } = {}) => {
-  const keys = [];
-  const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), '([^/]+)')) + '$');
-  routes.push({ method, re, keys, handler, local, hosted });
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'same-origin',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  ...(HOSTED && PUBLIC_URL.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
 
-route('GET', '/api/status', async ({ ctx }) => statusPayload(ctx));
-
-// Local mode only: re-detect the GitHub CLI after installing/signing in.
-route(
-  'POST',
-  '/api/recheck',
-  async ({ ctx }) => {
-    gh = await detectGh();
-    selectLocalProvider();
-    return statusPayload(contextFor(ctx.req));
-  },
-  { hosted: false },
-);
-
-// Hosted only: a private demo sandbox for visitors who haven't signed in (great for a landing page).
-route(
-  'POST',
-  '/api/demo',
-  async ({ ctx, res, ip }) => {
-    if (ctx.session && ctx.session.kind === 'user') throw new HttpError(409, "You're signed in — sign out to try the demo");
-    if (!demoLimiter(ip)) throw new HttpError(429, 'Too many demo sessions from this network, try again later');
-    if (!ctx.session) {
-      const s = sessions.create({ kind: 'demo' });
-      res.setHeader('Set-Cookie', sessions.setCookie(s));
-    }
-    return { ok: true };
-  },
-  { local: false },
-);
-
-route('GET', '/api/owners', async ({ ctx }) => {
-  if (!HOSTED) {
-    return gh.authed && !FORCE_DEMO ? createGithubProvider({ client: cliClient, viewer: gh.user }).listOwners() : localProvider.listOwners();
-  }
-  requireSession(ctx);
-  const owners = await cached(`${ctx.ns}:owners`, 60_000, () => ctx.provider.listOwners());
-  const visible = owners.filter((o) => orgAllowed(o.login) || ctx.session.kind === 'demo');
-  if (!billing || ctx.session.kind !== 'user') return visible;
-  const me = ctx.session.user;
-  const orgs = visible.filter((o) => o.type === 'Organization').map((o) => o.login);
-  return Promise.all(visible.map(async (o) => {
-    const personal = o.type === 'User' && o.login.toLowerCase() === me.login.toLowerCase() ? { memberOf: orgs } : undefined;
-    const [ent, ws] = await Promise.all([billing.entitlement(o.login, personal), billing.workspace(o.login)]);
-    return { ...o, building: { open: ent.ok, bonus: !!ent.bonus, via: ent.via || null, reason: ent.reason || null, connectedByMe: !!ws && ws.ownerId === String(me.id), connectedBy: ws ? ws.ownerLogin : null } };
-  }));
-});
-
-route('POST', '/api/connect', async ({ ctx, body }) => {
-  if (!HOSTED) {
-    if (body.demo) setConnection({ owner: getConfig().owner, demo: true });
-    else {
-      if (!gh.authed) throw new HttpError(409, 'GitHub CLI is not logged in. Run `gh auth login` first.');
-      setConnection({ owner: need(body.owner, OWNER_RE, 'organization'), demo: false });
-    }
-    selectLocalProvider();
-    return statusPayload(contextFor(ctx.req));
-  }
-  requireSession(ctx);
-  if (ctx.session.kind === 'demo') return statusPayload(ctx);
-  const owner = need(body.owner, OWNER_RE, 'organization');
-  const access = await accessFor(ctx, owner, true);
-  if (access.role === 'none') throw new HttpError(403, `You're not a member of ${owner} on GitHub`);
-  ctx.session.org = owner;
-  return statusPayload(contextFor(ctx.req));
-});
-
-// ---- subscriptions
-route('GET', '/api/billing', async ({ ctx }) => {
-  const user = requireSubscriber(ctx);
-  return billing.summary(user);
-}, { local: false });
-route('POST', '/api/billing/checkout', async ({ ctx }) => {
-  const user = requireSubscriber(ctx);
-  return billing.checkout(user);
-}, { local: false });
-route('POST', '/api/billing/confirm', async ({ ctx, body }) => {
-  const user = requireSubscriber(ctx);
-  return billing.confirm(user, body.sessionId);
-}, { local: false });
-route('POST', '/api/billing/portal', async ({ ctx }) => {
-  const user = requireSubscriber(ctx);
-  return billing.portal(user);
-}, { local: false });
-route(
-  'POST',
-  '/api/workspaces',
-  async ({ ctx, body }) => {
-    const user = requireSubscriber(ctx);
-    const org = need(body.org, OWNER_RE, 'organization');
-    if (!orgAllowed(org)) throw new HttpError(403, `This Company3D server isn't set up for ${org}`);
-    const result = await billing.connect(user, org, ctx.provider);
-    invalidate(`${ctx.ns}:${org}:access`);
-    return result;
-  },
-  { local: false },
-);
-route(
-  'DELETE',
-  '/api/workspaces/:org',
-  async ({ ctx, params }) => {
-    const user = requireSubscriber(ctx);
-    return billing.disconnect(user, need(params.org, OWNER_RE, 'organization'));
-  },
-  { local: false },
-);
-
-route('GET', '/api/world', async ({ ctx, query }) => {
-  const access = await requireOrg(ctx);
-  const world = await getWorld(ctx, query.get('fresh') === '1');
-  return {
-    mode: ctx.provider.mode,
-    viewer: ctx.viewer,
-    access,
-    owner: world.owner,
-    repos: world.repos,
-    memberCount: world.members ? world.members.length : null,
-    members: world.members ? world.members.map((m) => ({ login: m.login, name: m.name })) : null,
-    floors: await floorsFor(ctx, world),
-    links: (await ctx.settings.get()).links,
-  };
-});
-
-route('GET', '/api/floor/:repo', async ({ ctx, params, query }) => {
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  await requireOrg(ctx);
-  const world = await getWorld(ctx);
-  return cached(`${ctx.ns}:${ctx.owner}:floor:${repo}`, 30_000, () => ctx.provider.getFloor(world, repo), query.get('fresh') === '1');
-});
-
-route('GET', '/api/labels/:repo', async ({ ctx, params }) => {
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  await requireOrg(ctx);
-  return cached(`${ctx.ns}:${ctx.owner}:labels:${repo}`, 300_000, () => ctx.provider.listLabels(ctx.owner, repo));
-});
-
-// Building layout (floors + links) is Company3D's own data, not GitHub's, so we enforce who may change it.
-route('PUT', '/api/settings', async ({ ctx, body }) => {
-  const access = await requireOrg(ctx);
-  if (!access.canManage) throw new HttpError(403, 'Only organization owners can change the building layout');
-  const world = await getWorld(ctx);
-  const patch = {};
-  if (body.floors !== undefined) {
-    if (!Array.isArray(body.floors) || body.floors.length > 500) throw new HttpError(400, 'floors must be an array');
-    patch.floors = [...new Set(body.floors.map((f) => need(f, REPO_RE, 'repository name')))];
-  }
-  if (body.links !== undefined) {
-    if (!Array.isArray(body.links) || body.links.length > 200) throw new HttpError(400, 'links must be an array of at most 200');
-    patch.links = body.links.map((l) => ({
-      from: need(l && l.from, REPO_RE, 'repository name'),
-      to: need(l && l.to, REPO_RE, 'repository name'),
-      kind: String((l && l.kind) || 'depends on').slice(0, 40),
-    }));
-  }
-  const settings = await ctx.settings.update(patch);
-  invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return { floors: await floorsFor(ctx, world), links: settings.links };
-});
-
-route('POST', '/api/repos', async ({ ctx, body }) => {
-  const access = await requireOrg(ctx);
-  if (!access.canCreateRepo) throw new HttpError(403, `You don't have permission to create repositories in ${ctx.owner}`);
-  const world = await getWorld(ctx);
-  const name = need(body.name, REPO_RE, 'repository name');
-  const created = await ctx.provider.createRepo(world, {
-    name,
-    description: String(body.description || '').slice(0, 350),
-    isPrivate: body.isPrivate !== false,
-    autoInit: body.autoInit !== false,
-  });
-  // Give the new project a floor right away (if this person may change the layout).
-  if (access.canManage) {
-    const floors = await floorsFor(ctx, world);
-    await ctx.settings.update({ floors: [...floors.filter((f) => f !== created.name), created.name] });
-  }
-  invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return created;
-});
-
-route('POST', '/api/issues/:repo', async ({ ctx, params, body }) => {
-  await requireOrg(ctx);
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const title = String(body.title || '').trim();
-  if (!title) throw new HttpError(400, 'An issue needs a title');
-  const assignees = list(body.assignees, 10).map((a) => need(a, LOGIN_RE, 'assignee'));
-  const labels = list(body.labels, 20).map((l) => String(l).slice(0, 50));
-  const created = await ctx.provider.createIssue(ctx.owner, repo, { title: title.slice(0, 256), body: String(body.body || '').slice(0, 60_000), assignees, labels });
-  invalidate(`${ctx.ns}:${ctx.owner}:floor:${repo}`);
-  invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return created;
-});
-
-route('PATCH', '/api/issues/:repo/:number', async ({ ctx, params, body }) => {
-  await requireOrg(ctx);
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const number = Number(params.number);
-  if (!Number.isInteger(number) || number < 1) throw new HttpError(400, 'Invalid issue number');
-  const patch = {};
-  if (body.assignees) patch.assignees = list(body.assignees, 10).map((a) => need(a, LOGIN_RE, 'assignee'));
-  if (body.state) {
-    if (!['open', 'closed'].includes(body.state)) throw new HttpError(400, 'Invalid state');
-    patch.state = body.state;
-  }
-  const result = await ctx.provider.updateIssue(ctx.owner, repo, number, patch);
-  invalidate(`${ctx.ns}:${ctx.owner}:floor:${repo}`);
-  invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return result;
-});
-
-route('POST', '/api/prs/:repo/:number/merge', async ({ ctx, params, body }) => {
-  await requireOrg(ctx);
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const number = Number(params.number);
-  if (!Number.isInteger(number) || number < 1) throw new HttpError(400, 'Invalid pull request number');
-  const method = ['merge', 'squash', 'rebase'].includes(body.method) ? body.method : 'squash';
-  const result = await ctx.provider.mergePR(ctx.owner, repo, number, method);
-  invalidate(`${ctx.ns}:${ctx.owner}:floor:${repo}`);
-  invalidate(`${ctx.ns}:${ctx.owner}:world`);
-  return result;
-});
-
-// ---------------------------------------------------------------- avatars (same-origin proxy so canvases stay untainted)
-const avatarCache = new Map();
-async function avatarRoute(res, ctx, login) {
-  need(login, LOGIN_RE, 'login');
-  if (HOSTED) requireSession(ctx);
-  if (ctx.provider && ctx.provider.mode === 'demo') return send(res, 404, 'no avatar');
-  let entry = avatarCache.get(login);
-  if (!entry || Date.now() - entry.at > 6 * 3600_000) {
-    let img = null;
-    try {
-      img = await fetchAvatar(login);
-    } catch {
-      img = null;
-    }
-    entry = { at: Date.now(), img };
-    if (avatarCache.size > 2000) avatarCache.clear();
-    avatarCache.set(login, entry);
-  }
-  if (!entry.img) return send(res, 404, 'no avatar');
-  res.writeHead(200, { 'Content-Type': entry.img.type, 'Cache-Control': 'private, max-age=3600' });
-  res.end(entry.img.buffer);
-}
-
-// ---------------------------------------------------------------- static files
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -593,6 +86,15 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
+
+function send(res, status, body) {
+  const isJson = typeof body === 'object';
+  res.writeHead(status, {
+    'Content-Type': isJson ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(isJson ? JSON.stringify(body) : body);
+}
 
 function serveStatic(res, baseDir, relPath, extraHeaders = {}) {
   const file = path.normalize(path.join(baseDir, relPath));
@@ -606,18 +108,49 @@ function serveStatic(res, baseDir, relPath, extraHeaders = {}) {
   });
 }
 
-const serveIndex = (res) => serveStatic(res, PUBLIC, 'index.html', { 'Content-Security-Policy': CSP });
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer'];
 
-// ---------------------------------------------------------------- server
-const apiLimiter = rateLimiter({ capacity: 120, perMinute: 240 });
-const writeLimiter = rateLimiter({ capacity: 20, perMinute: 30 });
-const authLimiter = rateLimiter({ capacity: 10, perMinute: 20 });
-const demoLimiter = rateLimiter({ capacity: 5, perMinute: 2 });
+function endToEnd(headers) {
+  const out = { ...headers };
+  for (const h of HOP_BY_HOP) delete out[h];
+  return out;
+}
 
-async function handle(req, res) {
-  for (const [k, v] of Object.entries(securityHeaders)) res.setHeader(k, v);
+const proxied = (pathname) => pathname.startsWith('/api/') || pathname.startsWith('/auth/') || pathname.startsWith('/stripe/');
 
-  // DNS-rebinding / host-header protection: only answer for our own host name.
+function proxy(req, res, url) {
+  const headers = endToEnd(req.headers);
+  const remote = req.socket.remoteAddress || 'unknown';
+  const xff = req.headers['x-forwarded-for'];
+  headers['x-forwarded-for'] = typeof xff === 'string' && xff ? `${xff}, ${remote}` : remote;
+  const upstream = http.request(
+    {
+      hostname: API.hostname.replace(/^\[|\]$/g, ''),
+      port: API.port || 80,
+      path: url.pathname + url.search,
+      method: req.method,
+      headers,
+    },
+    (up) => {
+      res.writeHead(up.statusCode, endToEnd(up.headers));
+      up.pipe(res);
+    },
+  );
+  upstream.setTimeout(60_000, () => upstream.destroy(new Error('timeout')));
+  upstream.on('error', (e) => {
+    if (res.headersSent) return res.destroy();
+    console.error(`[proxy] ${req.method} ${url.pathname}: ${e.message}`);
+    send(res, 502, { error: 'The Worktown3D API is not responding' });
+  });
+  res.on('close', () => {
+    if (!res.writableFinished) upstream.destroy();
+  });
+  req.pipe(upstream);
+}
+
+function handle(req, res) {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+  if (req.url === '/healthz') return send(res, 200, 'ok');
   if (!ALLOWED_HOSTS.has(req.headers.host)) return send(res, 421, 'unknown host');
   const url = new URL(req.url, 'http://placeholder');
   let pathname;
@@ -627,159 +160,39 @@ async function handle(req, res) {
     return send(res, 400, 'bad url');
   }
   if (pathname.includes('\0')) return send(res, 400, 'bad url');
-  const ip = clientIp(req, TRUST_PROXY);
 
-  if (pathname === '/healthz') return send(res, 200, 'ok');
-
-  // ---- sign-in (hosted only)
-  if (pathname.startsWith('/auth/')) {
-    if (!HOSTED) return send(res, 404, 'not found');
-    if (!authLimiter(ip)) return send(res, 429, 'Too many sign-in attempts, try again in a minute');
-    if (req.method === 'GET' && pathname === '/auth/login') return auth.login(req, res, url);
-    if (req.method === 'GET' && pathname === '/auth/callback') return auth.callback(req, res, url);
-    if (req.method === 'POST' && pathname === '/auth/logout') {
-      if (!sameOrigin(req)) return send(res, 403, { error: 'Cross-site request blocked' });
-      return auth.logout(req, res);
-    }
-    return send(res, 404, 'not found');
-  }
-
-  // ---- Stripe webhook
-  if (pathname === '/stripe/webhook') {
-    if (!billing || req.method !== 'POST') return send(res, 404, 'not found');
-    let raw;
-    try {
-      raw = await readRaw(req, 1_000_000);
-    } catch (e) {
-      return send(res, e.status || 400, { error: e.message });
-    }
-    try {
-      await billing.webhook(raw, req.headers['stripe-signature']);
-      return send(res, 200, { received: true });
-    } catch (e) {
-      if (e.status === 400) return send(res, 400, { error: e.message });
-      console.error('[stripe webhook]', e.message);
-      return send(res, 500, { error: 'Webhook processing failed' }); // Stripe will retry
-    }
-  }
-
-  // ---- API
-  if (pathname.startsWith('/api/')) {
-    const write = req.method !== 'GET';
-    // CSRF: writes need our custom header (can't be sent cross-site without CORS) and a matching Origin.
-    if (write && !sameOrigin(req)) return send(res, 403, { error: 'Cross-site request blocked' });
-    const ctx = contextFor(req);
-    ctx.req = req;
-    const who = ctx.session ? ctx.session.id : ip;
-    if (!apiLimiter(who) || (write && !writeLimiter(who))) return send(res, 429, { error: 'Slow down a little — too many requests' });
-
-    if (req.method === 'GET' && pathname.startsWith('/api/avatar/')) {
-      try {
-        return await avatarRoute(res, ctx, pathname.slice('/api/avatar/'.length));
-      } catch (e) {
-        return send(res, e.status || 400, 'no avatar');
-      }
-    }
-    for (const r of routes) {
-      if (r.method !== req.method || (HOSTED ? !r.hosted : !r.local)) continue;
-      const m = pathname.match(r.re);
-      if (!m) continue;
-      const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
-      try {
-        const body = write ? await readBody(req) : {};
-        const result = await r.handler({ ctx, params, query: url.searchParams, body, res, ip });
-        return send(res, 200, result ?? { ok: true });
-      } catch (e) {
-        return sendError(res, ctx, req, pathname, e);
-      }
-    }
-    return send(res, 404, { error: 'Unknown API route' });
-  }
-
+  if (proxied(pathname)) return proxy(req, res, url);
   if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'method not allowed');
 
-  // ---- static
   if (pathname.startsWith('/vendor/three/')) {
     const rel = pathname.slice('/vendor/three/'.length);
     if (!rel.startsWith('build/') && !rel.startsWith('examples/jsm/')) return send(res, 404, 'not found');
     return serveStatic(res, THREE_DIR, rel);
   }
-  // building links like /o/my-org load the app, which opens that org
-  if (pathname === '/' || pathname === '/index.html' || /^\/o\/[A-Za-z0-9-]{1,39}\/?$/.test(pathname)) return serveIndex(res);
+  if (pathname === '/' || pathname === '/index.html' || /^\/o\/[A-Za-z0-9-]{1,39}\/?$/.test(pathname)) {
+    return serveStatic(res, PUBLIC, 'index.html', { 'Content-Security-Policy': CSP });
+  }
   return serveStatic(res, PUBLIC, pathname);
 }
 
-function sameOrigin(req) {
-  if (req.headers['x-company3d'] !== '1') return false;
-  const origin = req.headers.origin;
-  if (!origin) return true; // same-origin fetches may omit it; the custom header already proves it's our page
-  if (HOSTED) return origin === ORIGIN;
-  return ALLOWED_HOSTS.has(origin.replace(/^https?:\/\//, ''));
-}
-
-function sendError(res, ctx, req, pathname, e) {
-  let status = e.status && e.status >= 400 && e.status < 600 ? e.status : 500;
-  // GitHub said the token is no good (revoked, expired): end this session cleanly.
-  if (HOSTED && status === 401 && ctx.session && ctx.session.kind === 'user') {
-    sessions.destroy(ctx.session);
-    return send(res, 401, { error: 'Your GitHub sign-in expired. Please sign in again.', signedOut: true }, { 'Set-Cookie': sessions.clearCookie() });
-  }
-  if (status >= 500) console.error(`[api] ${req.method} ${pathname}: ${e.message}`);
-  // Internal details stay in the server log when the app is exposed to other people.
-  const message = HOSTED && status >= 500 && !(e instanceof GhError) ? 'Something went wrong on our side' : e.message || 'Something went wrong';
-  const body = { error: message };
-  if (e.signedOut) body.signedOut = true;
-  if (e.noOrg) body.noOrg = true;
-  if (e.needsSubscription) body.needsSubscription = true;
-  return send(res, status, body);
-}
-
 const server = http.createServer((req, res) => {
-  handle(req, res).catch((e) => {
+  try {
+    handle(req, res);
+  } catch (e) {
     console.error('[server]', e.message);
     if (!res.headersSent) send(res, 500, 'internal error');
     else res.destroy();
-  });
+  }
 });
-// slow-client protection
 server.headersTimeout = 20_000;
-server.requestTimeout = 30_000;
-
-if (!HOSTED) {
-  gh = FORCE_DEMO ? gh : await detectGh();
-  selectLocalProvider();
-}
+server.requestTimeout = 60_000;
 
 process.on('SIGTERM', () => {
   server.close();
-  Promise.resolve(pool && pool.end()).finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 });
 
 server.listen(PORT, HOST, () => {
-  if (HOSTED) {
-    console.log(`\n  🏢  Company3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
-    console.log(`  Sign-in callback URL: ${ORIGIN}/auth/callback`);
-    if (ALLOWED_ORGS.length) console.log(`  Restricted to organizations: ${ALLOWED_ORGS.join(', ')}`);
-    console.log('  Storage: PostgreSQL');
-    if (billing) {
-      console.log(`  Subscriptions: on (${PLAN.name}, ${env.STRIPE_SECRET_KEY.startsWith('sk_live_') ? 'LIVE' : 'test'} mode). Stripe webhook: ${ORIGIN}/stripe/webhook`);
-      if (COMPLIMENTARY_ORGS.length) console.log(`  Free organizations: ${COMPLIMENTARY_ORGS.join(', ')}`);
-    } else console.log('  Subscriptions: off (every organization member can open its building).');
-    if (!SECURE) console.log('  ⚠️  PUBLIC_URL is not https — fine for local testing, never for production.');
-    console.log('');
-    return;
-  }
-  const s = statusPayload(contextFor({ headers: {} }));
-  console.log(`\n  🏢  Company3D is open at  http://localhost:${PORT}\n`);
-  if (s.mode === 'github') {
-    console.log(`  GitHub CLI ${s.gh.version} — signed in as @${s.gh.user.login}`);
-    console.log(s.owner ? `  Connected organization: ${s.owner}` : '  Pick an organization in the browser to get started.');
-  } else if (FORCE_DEMO) {
-    console.log('  Running in demo mode (--demo) with a fictional company.');
-  } else {
-    console.log(`  Demo mode: ${gh.error || 'demo selected in the manager office'}`);
-    if (!gh.installed) console.log('  Install the GitHub CLI (https://cli.github.com) and run `gh auth login` to use your real org.');
-  }
-  console.log('');
+  const where = HOSTED ? PUBLIC_URL.origin : `http://localhost:${PORT}`;
+  console.log(`\n  🏢  Worktown3D is open at  ${where}  (API: ${API.origin})\n`);
 });
