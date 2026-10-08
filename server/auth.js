@@ -15,7 +15,7 @@ export function safeNext(next) {
 
 export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions, secure }) {
   const redirectUri = `${publicUrl}/auth/callback`;
-  const stateCookie = secure ? '__Host-c3d_oauth' : 'c3d_oauth';
+  const stateCookie = secure ? '__Host-wt3d_oauth' : 'wt3d_oauth';
   const pending = new Map(); // state -> { verifier, next, at }
 
   setInterval(() => {
@@ -26,7 +26,7 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
   async function tokenRequest(params) {
     const res = await fetch(`${GITHUB}/login/oauth/access_token`, {
       method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Company3D' },
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Worktown3D' },
       body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, ...params }),
       signal: AbortSignal.timeout(15_000),
     });
@@ -88,7 +88,7 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
       try {
         token = await tokenRequest({ code, redirect_uri: redirectUri, code_verifier: p.verifier });
         const res2 = await fetch(`${API}/user`, {
-          headers: { Authorization: `Bearer ${token.access}`, Accept: 'application/vnd.github+json', 'User-Agent': 'Company3D' },
+          headers: { Authorization: `Bearer ${token.access}`, Accept: 'application/vnd.github+json', 'User-Agent': 'Worktown3D' },
           signal: AbortSignal.timeout(15_000),
         });
         if (!res2.ok) throw new Error(`GitHub /user returned ${res2.status}`);
@@ -116,7 +116,7 @@ export function createAuth({ publicUrl, clientId, clientSecret, scopes, sessions
             Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
             Accept: 'application/vnd.github+json',
             'Content-Type': 'application/json',
-            'User-Agent': 'Company3D',
+            'User-Agent': 'Worktown3D',
           },
           body: JSON.stringify({ access_token: s.token.access }),
           signal: AbortSignal.timeout(10_000),

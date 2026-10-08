@@ -1,4 +1,4 @@
-// Company3D server: serves the 3D client and a small JSON API backed by GitHub.
+// Worktown3D server: serves the 3D client and a small JSON API backed by GitHub.
 //
 // Two modes:
 //  - Local (default): acts as you through the GitHub CLI (`gh`). Listens on localhost only.
@@ -52,7 +52,7 @@ if (hostedSet.length && hostedSet.length < hostedVars.length) {
 const HOSTED = hostedSet.length === hostedVars.length;
 const PUBLIC_URL = HOSTED ? new URL(env.PUBLIC_URL) : null;
 if (PUBLIC_URL && (PUBLIC_URL.pathname !== '/' || PUBLIC_URL.search || PUBLIC_URL.hash)) {
-  console.error('\n  PUBLIC_URL must be just an origin, like https://company3d.example.com\n');
+  console.error('\n  PUBLIC_URL must be just an origin, like https://worktown3d.example.com\n');
   process.exit(1);
 }
 const SECURE = HOSTED && PUBLIC_URL.protocol === 'https:';
@@ -253,7 +253,7 @@ function requireSession(ctx) {
 /** Is the viewer allowed into this building, and as what? Re-checked every few minutes so people who leave lose access. */
 async function accessFor(ctx, owner, fresh = false) {
   if (!orgAllowed(owner) && !(ctx.session && ctx.session.kind === 'demo')) {
-    throw new HttpError(403, `This Company3D server isn't set up for ${owner}`);
+    throw new HttpError(403, `This Worktown3D server isn't set up for ${owner}`);
   }
   return cached(`${ctx.ns}:${owner}:access`, 5 * 60_000, () => ctx.provider.access(owner), fresh);
 }
@@ -272,10 +272,10 @@ async function requireOrg(ctx) {
     if (!ent.ok) {
       const message =
         ent.reason === 'inactive'
-          ? `${ctx.owner}'s Company3D subscription isn't active. Ask @${ent.ownerLogin} to renew it.`
+          ? `${ctx.owner}'s Worktown3D subscription isn't active. Ask @${ent.ownerLogin} to renew it.`
           : access.canManage
-            ? `${ctx.owner} isn't on Company3D yet. Subscribe and connect it to open the building.`
-            : `${ctx.owner} isn't on Company3D yet. Ask one of its owners to subscribe.`;
+            ? `${ctx.owner} isn't on Worktown3D yet. Subscribe and connect it to open the building.`
+            : `${ctx.owner} isn't on Worktown3D yet. Ask one of its owners to subscribe.`;
       throw new HttpError(402, message, { needsSubscription: true });
     }
     access = { ...access, billing: { pastDue: !!ent.pastDue, bonus: !!ent.bonus, via: ent.via || null, complimentary: !!ent.complimentary } };
@@ -429,7 +429,7 @@ route(
   async ({ ctx, body }) => {
     const user = requireSubscriber(ctx);
     const org = need(body.org, OWNER_RE, 'organization');
-    if (!orgAllowed(org)) throw new HttpError(403, `This Company3D server isn't set up for ${org}`);
+    if (!orgAllowed(org)) throw new HttpError(403, `This Worktown3D server isn't set up for ${org}`);
     const result = await billing.connect(user, org, ctx.provider);
     invalidate(`${ctx.ns}:${org}:access`);
     return result;
@@ -475,7 +475,7 @@ route('GET', '/api/labels/:repo', async ({ ctx, params }) => {
   return cached(`${ctx.ns}:${ctx.owner}:labels:${repo}`, 300_000, () => ctx.provider.listLabels(ctx.owner, repo));
 });
 
-// Building layout (floors + links) is Company3D's own data, not GitHub's, so we enforce who may change it.
+// Building layout (floors + links) is Worktown3D's own data, not GitHub's, so we enforce who may change it.
 route('PUT', '/api/settings', async ({ ctx, body }) => {
   const access = await requireOrg(ctx);
   if (!access.canManage) throw new HttpError(403, 'Only organization owners can change the building layout');
@@ -710,7 +710,7 @@ async function handle(req, res) {
 }
 
 function sameOrigin(req) {
-  if (req.headers['x-company3d'] !== '1') return false;
+  if (req.headers['x-worktown3d'] !== '1') return false;
   const origin = req.headers.origin;
   if (!origin) return true; // same-origin fetches may omit it; the custom header already proves it's our page
   if (HOSTED) return origin === ORIGIN;
@@ -758,7 +758,7 @@ process.on('SIGTERM', () => {
 
 server.listen(PORT, HOST, () => {
   if (HOSTED) {
-    console.log(`\n  🏢  Company3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
+    console.log(`\n  🏢  Worktown3D (hosted mode) at ${ORIGIN}  — listening on ${HOST}:${PORT}`);
     console.log(`  Sign-in callback URL: ${ORIGIN}/auth/callback`);
     if (ALLOWED_ORGS.length) console.log(`  Restricted to organizations: ${ALLOWED_ORGS.join(', ')}`);
     console.log('  Storage: PostgreSQL');
@@ -771,7 +771,7 @@ server.listen(PORT, HOST, () => {
     return;
   }
   const s = statusPayload(contextFor({ headers: {} }));
-  console.log(`\n  🏢  Company3D is open at  http://localhost:${PORT}\n`);
+  console.log(`\n  🏢  Worktown3D is open at  http://localhost:${PORT}\n`);
   if (s.mode === 'github') {
     console.log(`  GitHub CLI ${s.gh.version} — signed in as @${s.gh.user.login}`);
     console.log(s.owner ? `  Connected organization: ${s.owner}` : '  Pick an organization in the browser to get started.');

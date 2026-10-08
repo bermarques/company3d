@@ -21,7 +21,7 @@ requires a custom header plus same origin on every write (CSRF protection). Don'
   and are revoked on sign-out. Sessions are random 256-bit ids in `HttpOnly`, `SameSite=Lax`, `Secure`
   (`__Host-` prefixed) cookies with idle and absolute expiry.
 - Access to a building requires active membership of that organization, re-checked every few minutes, so people
-  who leave lose access. Company3D's own settings (floor layout, repo connections) can only be changed by org owners.
+  who leave lose access. Worktown3D's own settings (floor layout, repo connections) can only be changed by org owners.
 - Cached GitHub data is namespaced per user, so one person's private data never reaches another.
 - Strict Content-Security-Policy (no inline script except the hashed import map, no framing), `nosniff`,
   `Referrer-Policy`, HSTS on https, rate limits on sign-in, API and writes, request size and time limits.

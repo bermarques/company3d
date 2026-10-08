@@ -1,4 +1,4 @@
-// Fetch wrappers for the Company3D server.
+// Fetch wrappers for the Worktown3D server.
 let onSignedOut = () => {};
 
 /** Called when the server says our session is gone (hosted mode) so the app can show the sign-in screen. */
@@ -10,7 +10,7 @@ async function req(method, url, body) {
   const res = await fetch(url, {
     method,
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-Company3D': '1' },
+    headers: { 'Content-Type': 'application/json', 'X-Worktown3D': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;

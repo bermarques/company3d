@@ -1,5 +1,5 @@
 // Two interchangeable ways to talk to GitHub:
-//  - cliClient: the local GitHub CLI (`gh`), for running Company3D on your own machine.
+//  - cliClient: the local GitHub CLI (`gh`), for running Worktown3D on your own machine.
 //  - createTokenClient: a signed-in user's OAuth token, for the hosted multi-user mode.
 // Both expose rest(endpoint, { method, body }) and graphql(query, variables).
 import { ghApi, graphql as ghGraphql, GhError } from './gh.js';
@@ -33,7 +33,7 @@ function missingPermissionMessage(path = []) {
   const field = [...path].reverse().find((p) => typeof p === 'string' && FIELD_PERMISSION[p]);
   const perm = field ? `the "${FIELD_PERMISSION[field]}"` : 'a required';
   return (
-    `The Company3D GitHub App is missing ${perm} permission here. In the app's settings on GitHub (Permissions & events), ` +
+    `The Worktown3D GitHub App is missing ${perm} permission here. In the app's settings on GitHub (Permissions & events), ` +
     `add it with the access listed in the README, then have an organization owner accept the update under ` +
     `the organization's Settings → GitHub Apps.`
   );
@@ -58,7 +58,7 @@ export function createTokenClient(getToken) {
           Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'Company3D',
+          'User-Agent': 'Worktown3D',
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,

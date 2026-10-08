@@ -1,4 +1,4 @@
-# Company3D 🏢
+# Worktown3D 🏢
 
 A cartoon, first-person 3D office for your GitHub organization. Every repository is a floor, every current
 team member sits at a desk, and their laptop shows what they're actually working on. Walk around, read
@@ -23,7 +23,7 @@ Without the GitHub CLI you get a fictional **demo company** so you can explore r
 To use your real organization:
 
 1. Install the GitHub CLI: `winget install --id GitHub.cli` (or see https://cli.github.com)
-2. Sign in: `gh auth login` (the default scopes `repo` and `read:org` are what Company3D needs)
+2. Sign in: `gh auth login` (the default scopes `repo` and `read:org` are what Worktown3D needs)
 3. On the title screen press **Check again**, then pick an organization (or your personal account).
 
 ## Hosted mode (your team signs in with GitHub)
@@ -36,9 +36,9 @@ only your company will use it).
 | Setting | Value |
 | --- | --- |
 | Homepage URL | your `PUBLIC_URL` |
-| Callback URL | `PUBLIC_URL/auth/callback` (for example `https://company3d.example.com/auth/callback`) |
+| Callback URL | `PUBLIC_URL/auth/callback` (for example `https://worktown3d.example.com/auth/callback`) |
 | Expire user authorization tokens | ✅ on |
-| Setup URL (optional) | `PUBLIC_URL/`, so people land back in Company3D after installing the app |
+| Setup URL (optional) | `PUBLIC_URL/`, so people land back in Worktown3D after installing the app |
 | Webhook | off (not used yet) |
 | Where can it be installed | "Only on this account" for one company, "Any account" for a public product |
 
@@ -92,7 +92,7 @@ organizations is subscribed. Cards, invoices and cancelling are handled in Strip
 If a payment fails the building stays open while Stripe retries; once the subscription ends it closes.
 
 **Set up Stripe (test mode first):**
-1. **Product catalog → Add product**: "Company3D Basic", recurring price **R$25.00 BRL / month**. Copy the
+1. **Product catalog → Add product**: "Worktown3D Basic", recurring price **R$25.00 BRL / month**. Copy the
    **Price ID** (`price_…`) into `STRIPE_PRICE_ID`.
 2. **Developers → API keys**: copy the secret key (`sk_test_…`) into `STRIPE_SECRET_KEY`.
 3. **Developers → Webhooks → Add endpoint**: `PUBLIC_URL/stripe/webhook`, with the events

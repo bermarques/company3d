@@ -290,7 +290,7 @@ function hostedOrgTab(app) {
     s.billing ? planCard({ compact: true }) : null,
     h('h3', null, 'Your buildings'),
     owners,
-    s.installUrl && can.manage(app) ? h('p', { class: 'muted small' }, 'Add another organization by ', h('a', { href: s.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'installing the Company3D GitHub App'), ' on it.') : null,
+    s.installUrl && can.manage(app) ? h('p', { class: 'muted small' }, 'Add another organization by ', h('a', { href: s.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'installing the Worktown3D GitHub App'), ' on it.') : null,
   );
 }
 

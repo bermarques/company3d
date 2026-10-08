@@ -31,7 +31,7 @@ export const randomId = (bytes = 32) => crypto.randomBytes(bytes).toString('base
 
 export function createSessionStore({ secure }) {
   // __Host- prefix: the browser refuses to set it without Secure, Path=/ and no Domain.
-  const name = secure ? '__Host-c3d_sid' : 'c3d_sid';
+  const name = secure ? '__Host-wt3d_sid' : 'wt3d_sid';
   const sessions = new Map();
 
   setInterval(() => {

@@ -1,6 +1,6 @@
 import { verifyWebhook } from "./stripe.js";
 
-export const PLAN = { id: "basic", name: "Company3D Basic", orgLimit: 1 };
+export const PLAN = { id: "basic", name: "Worktown3D Basic", orgLimit: 1 };
 
 const OPEN_STATUSES = new Set(["active", "trialing", "past_due"]);
 const SESSION_RE = /^cs_[A-Za-z0-9_]{10,200}$/;

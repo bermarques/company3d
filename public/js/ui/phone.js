@@ -480,7 +480,7 @@ export function createPhone(app, hooks) {
         h(
           'div',
           { class: 'ph-actions' },
-          h('a', { class: 'btn small primary', href: p.url, download: `company3d-${stamp}.jpg` }, '💾 Save'),
+          h('a', { class: 'btn small primary', href: p.url, download: `worktown3d-${stamp}.jpg` }, '💾 Save'),
           h(
             'button',
             {
@@ -530,7 +530,7 @@ export function createPhone(app, hooks) {
         toggle('shadows', '🌗 Shadows'),
         toggle('outlines', '✏️ Cartoon outlines'),
         toggle('sound', '🔊 Sounds'),
-        h('div', { class: 'ph-about' }, h('strong', null, 'Company3D'), h('div', null, app.isDemo ? 'Demo company (fictional data)' : `Connected to @${app.world.owner.login} as @${app.viewerLogin()} (${roleLabel(app)})`)),
+        h('div', { class: 'ph-about' }, h('strong', null, 'Worktown3D'), h('div', null, app.isDemo ? 'Demo company (fictional data)' : `Connected to @${app.world.owner.login} as @${app.viewerLogin()} (${roleLabel(app)})`)),
       );
     },
   };
