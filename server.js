@@ -139,8 +139,9 @@ function proxy(req, res, url) {
   upstream.setTimeout(60_000, () => upstream.destroy(new Error('timeout')));
   upstream.on('error', (e) => {
     if (res.headersSent) return res.destroy();
-    console.error(`[proxy] ${req.method} ${url.pathname}: ${e.message}`);
-    send(res, 502, { error: 'The Worktown3D API is not responding' });
+    const reason = e.errors ? e.errors.map((x) => x.message).join(', ') : e.message || e.code;
+    console.error(`[proxy] ${req.method} ${url.pathname}: ${reason}`);
+    send(res, 503, { error: 'The Worktown3D API is not responding' });
   });
   res.on('close', () => {
     if (!res.writableFinished) upstream.destroy();
