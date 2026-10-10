@@ -367,6 +367,11 @@ export class RepoFloor {
     return this.characters.find((c) => c.login.toLowerCase() === key) || null;
   }
 
+  /** Hide the desk characters of these people (lower-case logins) while they walk around the floor live. */
+  setHidden(logins) {
+    for (const ch of this.characters) ch.root.visible = !logins.has(ch.login.toLowerCase());
+  }
+
   /** Where to stand to see someone: behind their shoulder at the desk, or next to them on a break. */
   personSpot(login) {
     const ch = this.findCharacter(login);

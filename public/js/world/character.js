@@ -13,6 +13,24 @@ const damp = (current, target, k, dt) => current + (target - current) * (1 - Mat
 const STAND_Y = 0.63;
 const SIT_Y = 0.45;
 
+const HEX = /^#[0-9a-f]{6}$/i;
+
+/**
+ * What a custom character (character customization, on the roadmap) changes in someone's look: skin, shirt, pants and
+ * hair colors (#rrggbb), hairStyle (0 short, 1 spiky, 2 bun, 3 long, 4 beanie, 5 curly, 6 bald), glasses and
+ * headphones (true/false) and height (0.9 to 1.1). Anything else, or out of range, is ignored, and what isn't set
+ * keeps the look drawn from the login.
+ */
+export function customLook(character) {
+  const out = {};
+  if (!character || typeof character !== 'object') return out;
+  for (const key of ['skin', 'shirt', 'pants', 'hair']) if (typeof character[key] === 'string' && HEX.test(character[key])) out[key] = character[key];
+  if (Number.isInteger(character.hairStyle) && character.hairStyle >= 0 && character.hairStyle <= 6) out.hairStyle = character.hairStyle;
+  for (const key of ['glasses', 'headphones']) if (typeof character[key] === 'boolean') out[key] = character[key];
+  if (typeof character.height === 'number' && character.height >= 0.9 && character.height <= 1.1) out.height = character.height;
+  return out;
+}
+
 function joint(parent, x, y, z) {
   const g = new THREE.Group();
   g.position.set(x, y, z);
@@ -23,9 +41,10 @@ function joint(parent, x, y, z) {
 export class Character {
   /**
    * @param {object} dev   floor dev model ({login, name, status, current, ...})
-   * @param {object} opts  { seat: {x, z, rotY}, floor }  floor provides pathToCoffee()/coffeeSpot()
+   * @param {object} opts  { seat: {x, z, rotY}, floor, character }  floor provides pathToCoffee()/coffeeSpot();
+   *                       character: a custom look (see customLook), when the person has one
    */
-  constructor(dev, { seat, floor }) {
+  constructor(dev, { seat, floor, character = null }) {
     this.dev = dev;
     this.login = dev.login;
     this.seat = seat;
@@ -44,6 +63,7 @@ export class Character {
       glasses: r() < 0.35,
       headphones: r() < 0.15,
       height: 0.95 + r() * 0.1,
+      ...customLook(character),
     };
 
     this.root = new THREE.Group();

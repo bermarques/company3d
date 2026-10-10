@@ -15,6 +15,9 @@ handled by the API (worktown3d-api), whose SECURITY.md covers them.
   (`API_URL`) unchanged, keeping the `Host` header and appending the client address to `X-Forwarded-For`, so the
   API's host check, CSRF check and `__Host-` session cookies all apply to this one origin. `API_URL` must be a
   private address: the API should never be reachable from the internet.
+- The multiplayer WebSocket (`/api/live`) goes through the same host check and is passed to the API unchanged
+  (`Origin`, cookies and all), which checks the origin, the session and access to the building. Other WebSocket
+  upgrades are refused.
 - Without `PUBLIC_URL` (local mode) it listens on `127.0.0.1` and only answers for `localhost` host names
   (DNS-rebinding protection). With `PUBLIC_URL` it only answers for that host name.
 - Strict Content-Security-Policy (no inline script except the hashed import map, no framing), `nosniff`,

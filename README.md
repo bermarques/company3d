@@ -61,6 +61,9 @@ npm start
 With `PUBLIC_URL` set the app listens on all interfaces and only answers for that host name. Put it behind HTTPS:
 a reverse proxy like Caddy or nginx, or a platform such as Railway. The GitHub App's callback URL and the Stripe
 webhook point at this app (`PUBLIC_URL/auth/callback`, `PUBLIC_URL/stripe/webhook`), which forwards them to the API.
+Multiplayer is a WebSocket on `/api/live`, forwarded to the API like the rest of `/api`, so a reverse proxy in front
+of this app has to pass WebSocket upgrades through (Caddy and Railway do; nginx needs `proxy_http_version 1.1` and the
+`Upgrade` and `Connection` headers).
 
 ### On Railway
 
@@ -87,6 +90,14 @@ the organization and shows them exactly what their GitHub access allows:
 | Not a member | nothing | they're told they're not part of the org |
 
 People who leave the organization lose access within a few minutes, and they stop appearing as characters.
+
+### Play together
+
+In an organization's building you see the teammates who are there at the same time, walking around the floors with
+a 🟢 name tag, and they see you. While someone is on a floor, their desk character there steps away, so each person
+appears once (you included). The 🟢 chip under the floor name says how many others are in the building; click it, or
+open **👥 Team** on the phone, to see where they are and **Take me there**. Personal buildings and the demo company
+are single-player. If the same person opens the building in two tabs, the newest one is the one others see.
 
 ### Subscriptions
 
@@ -135,7 +146,8 @@ A pocket shortcut to everything, from anywhere in the building:
 - **📋 Board**: quick view of any floor's team board (not just the one you're on), plus "New issue".
 - **🛗 Floors**: tap a floor to ride there.
 - **👥 Team**: who's on this floor, or everyone in the org with the floors they work on and what they're doing.
-  **Take me there** rides to their floor, puts you by their desk and drops a bouncing marker over their head.
+  People in the building right now come first, with where they are (🟢). **Take me there** rides to their floor and
+  puts you next to them (or by their desk, with a bouncing marker over their head).
 - **🚀 Ready**: every PR that's ready to merge across all floors, with a merge button.
 - **🔔 Activity**: new issues, PRs, merges and your own actions; the 📱 chip shows unread news.
 - **📸 Camera**: snapshot the office (no HUD) and save it as a JPEG.
@@ -147,8 +159,9 @@ A pocket shortcut to everything, from anywhere in the building:
 server.js                  web server: static files, CSP and security headers, proxy to the API
 public/js/api.js           calls to the API (same origin, through the proxy)
 public/js/main.js          renderer, game loop, floors, elevator rides, polling, actions
+public/js/live.js          multiplayer: the /api/live WebSocket, who's in the building, sending your position
 public/js/permissions.js   which buttons the viewer gets, from their GitHub permissions
-public/js/world/*          building, furniture, characters, repo floor, lobby, canvas screens
+public/js/world/*          building, furniture, characters, repo floor, lobby, canvas screens, other players
 public/js/ui/*             HUD, panels, Kanban, phone, manager console, title screen, plan card
 ```
 
@@ -159,11 +172,9 @@ Security details are in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- **Subscriptions, next steps.** Bigger plans (more organizations), GitHub App webhooks so uninstalls and membership
-  removals take effect instantly, and sign-in sessions in PostgreSQL so deploys don't sign people out.
+- **Bigger plans.** Subscriptions that connect more than one organization.
 - **Character customization.** People who sign in with their own GitHub account can design the character that
   represents them (hair, colors, accessories). Profiles will be keyed by GitHub user id and editable only by that
-  person, from a "Me" app on the phone.
-- **Multiplayer.** In shared buildings (organizations), people see the other players who are connected at the same
-  time. Personal buildings stay offline (single-player). When a player enters a floor, their NPC is removed from it,
-  so each person appears only once.
+  person, from a "Me" app on the phone. Characters already take a custom look (`customLook` in
+  `world/character.js` lists what can change), and the people walking around redraw as soon as theirs changes; desk
+  characters will pick it up from the floor data.
