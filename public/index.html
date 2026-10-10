@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Company3D</title>
+    <title>Worktown3D</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏢</text></svg>" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -49,17 +49,6 @@
     <div id="start"></div>
     <div id="modal-root"></div>
 
-    <script type="module">
-      // Canvas text needs the web fonts before the first in-world texture is drawn.
-      const ready = Promise.race([
-        Promise.all([
-          document.fonts.load('700 40px Fredoka'),
-          document.fonts.load('800 40px Nunito'),
-          document.fonts.load('700 40px Nunito'),
-        ]),
-        new Promise((r) => setTimeout(r, 2500)),
-      ]);
-      ready.finally(() => import('/js/main.js'));
-    </script>
+    <script type="module" src="/js/boot.js"></script>
   </body>
 </html>

@@ -5,6 +5,7 @@ import { openBoardPanel, openDevPanel, openIssueForm } from './panels.js';
 import { blip, shutter, hud } from './hud.js';
 import { timeAgo } from '../engine/canvas.js';
 import { BOARD_COLUMNS, prBadges } from '../world/screens.js';
+import { can, roleLabel } from '../permissions.js';
 
 const APPS = [
   { id: 'board', name: 'Board', icon: '📋', color: '#4dabf7' },
@@ -252,7 +253,7 @@ export function createPhone(app, hooks) {
           isHere
             ? h('button', { class: 'btn small', onClick: () => leaveFor(() => openBoardPanel(app), { resume: false }) }, '🔍 Full board')
             : h('button', { class: 'btn small', onClick: () => leaveFor(() => app.rideTo(indexOf(repo))) }, `🛗 Go to ${label(indexOf(repo))}`),
-          h('button', { class: 'btn small primary', onClick: () => leaveFor(() => openIssueForm(app, { repo }), { resume: false }) }, '+ New issue'),
+          can.createIssue(app, repo) ? h('button', { class: 'btn small primary', onClick: () => leaveFor(() => openIssueForm(app, { repo }), { resume: false }) }, '+ New issue') : null,
         ),
       );
     },
@@ -401,7 +402,7 @@ export function createPhone(app, hooks) {
                   h('div', { class: 'ph-card-top' }, h('span', { class: 'floor-num tiny' }, label(p.index)), h('strong', null, `${p.repo} #${p.number}`), ghLink(p.url, '↗')),
                   h('div', { class: 'ph-card-title' }, p.title),
                   h('div', { class: 'muted small' }, `by @${p.author} · ${p.approvals} approval${p.approvals === 1 ? '' : 's'} · +${p.additions ?? 0} −${p.deletions ?? 0}`),
-                  h('div', { class: 'ph-actions' }, merge, h('button', { class: 'btn small', onClick: () => leaveFor(() => app.rideTo(p.index)) }, `🛗 ${label(p.index)}`)),
+                  h('div', { class: 'ph-actions' }, can.merge(app, p.repo) ? merge : h('span', { class: 'muted small' }, 'Needs write access to merge'), h('button', { class: 'btn small', onClick: () => leaveFor(() => app.rideTo(p.index)) }, `🛗 ${label(p.index)}`)),
                 );
               }),
             )
@@ -479,7 +480,7 @@ export function createPhone(app, hooks) {
         h(
           'div',
           { class: 'ph-actions' },
-          h('a', { class: 'btn small primary', href: p.url, download: `company3d-${stamp}.jpg` }, '💾 Save'),
+          h('a', { class: 'btn small primary', href: p.url, download: `worktown3d-${stamp}.jpg` }, '💾 Save'),
           h(
             'button',
             {
@@ -521,7 +522,6 @@ export function createPhone(app, hooks) {
           h('span', null, text),
           h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: !!s[key], onChange: (e) => app.applySettings({ [key]: e.target.checked }) }), h('span')),
         );
-      const st = app.status;
       return appScreen(
         'Settings',
         slider('sensitivity', 0.3, 2.5, 0.1, { label: 'Mouse sensitivity ', value: (v) => `${v.toFixed(1)}×` }),
@@ -530,7 +530,7 @@ export function createPhone(app, hooks) {
         toggle('shadows', '🌗 Shadows'),
         toggle('outlines', '✏️ Cartoon outlines'),
         toggle('sound', '🔊 Sounds'),
-        h('div', { class: 'ph-about' }, h('strong', null, 'Company3D'), h('div', null, app.isDemo ? 'Demo company (fictional data)' : `Connected to @${app.world.owner.login}${st && st.gh.user ? ` as @${st.gh.user.login}` : ''}`)),
+        h('div', { class: 'ph-about' }, h('strong', null, 'Worktown3D'), h('div', null, app.isDemo ? 'Demo company (fictional data)' : `Connected to @${app.world.owner.login} as @${app.viewerLogin()} (${roleLabel(app)})`)),
       );
     },
   };

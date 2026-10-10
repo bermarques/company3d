@@ -1,287 +1,82 @@
-// Company3D local server: serves the 3D client and exposes a small JSON API backed by the GitHub CLI.
-// It only listens on localhost because it acts with your `gh` credentials.
+// Worktown3D web app: serves the 3D client and proxies /api, /auth and /stripe to the Worktown3D API
+// (API_URL), so the browser only ever talks to this origin.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { detectGh } from './server/gh.js';
-import { createGithubProvider } from './server/github-provider.js';
-import { createDemoProvider } from './server/demo-provider.js';
-import { getConfig, setConnection, ownerSettings, updateOwnerSettings } from './server/config.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+try {
+  process.loadEnvFile(path.join(ROOT, '.env'));
+} catch {
+  /* no .env file: use the real environment */
+}
+
+const env = process.env;
 const PUBLIC = path.join(ROOT, 'public');
 const THREE_DIR = path.join(ROOT, 'node_modules', 'three');
-const PORT = Number(process.env.PORT) || 3000;
-const HOST = '127.0.0.1';
-const FORCE_DEMO = process.argv.includes('--demo');
-const DEFAULT_FLOOR_COUNT = 15;
+const INDEX = path.join(PUBLIC, 'index.html');
+const PORT = Number(env.PORT) || 3000;
 
-const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
-const REPO_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
-const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
-
-const demoProvider = createDemoProvider();
-let gh = { installed: false, authed: false };
-let provider = demoProvider;
-
-function selectProvider() {
-  const cfg = getConfig();
-  provider = !FORCE_DEMO && !cfg.demo && gh.authed ? createGithubProvider(gh) : demoProvider;
-  cache.clear();
+function fail(message) {
+  console.error(`\n  ${message}\n`);
+  process.exit(1);
 }
 
-function currentOwner() {
-  if (provider.mode === 'demo') return 'demo-co';
-  return getConfig().owner;
-}
-
-// ---------------------------------------------------------------- cache
-const cache = new Map();
-function cached(key, ttlMs, fn, fresh = false) {
-  const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < ttlMs) return hit.promise;
-  const promise = fn();
-  cache.set(key, { at: Date.now(), promise });
-  promise.catch(() => cache.delete(key));
-  return promise;
-}
-function invalidate(prefix) {
-  for (const k of cache.keys()) if (k.startsWith(prefix)) cache.delete(k);
-}
-
-// ---------------------------------------------------------------- helpers
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
+function parseUrl(value) {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
   }
 }
 
-function send(res, status, body, headers = {}) {
-  const data = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
-  res.writeHead(status, {
-    'Content-Type': typeof body === 'object' && !Buffer.isBuffer(body) ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-store',
-    ...headers,
-  });
-  res.end(data);
+const PUBLIC_URL = env.PUBLIC_URL ? parseUrl(env.PUBLIC_URL) : null;
+if (env.PUBLIC_URL && (!PUBLIC_URL || !/^https?:$/.test(PUBLIC_URL.protocol) || PUBLIC_URL.pathname !== '/' || PUBLIC_URL.search || PUBLIC_URL.hash)) {
+  fail('PUBLIC_URL must be just an origin, like https://worktown3d.example.com');
+}
+const API = parseUrl(env.API_URL || 'http://127.0.0.1:3001');
+if (!API || API.protocol !== 'http:' || API.pathname !== '/' || API.search || API.username || API.password) {
+  fail('API_URL must be the API\'s plain http:// origin, like http://127.0.0.1:3001');
+}
+const HOSTED = !!PUBLIC_URL;
+const HOST = env.HOST || (HOSTED ? undefined : '127.0.0.1');
+const ALLOWED_HOSTS = new Set(HOSTED ? [PUBLIC_URL.host] : [`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
+
+function inlineScriptHashes(htmlFile) {
+  const html = fs.readFileSync(htmlFile, 'utf8');
+  const hashes = [];
+  for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    hashes.push(`'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
+  }
+  return hashes;
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > 1_000_000) {
-        reject(new HttpError(413, 'Request body too large'));
-        req.destroy();
-      } else chunks.push(c);
-    });
-    req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new HttpError(400, 'Invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
+const CSP = [
+  "default-src 'self'",
+  `script-src 'self' ${inlineScriptHashes(INDEX).join(' ')}`,
+  "style-src 'self' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  "img-src 'self' data: blob:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+].join('; ');
 
-function need(value, re, what) {
-  if (typeof value !== 'string' || !re.test(value)) throw new HttpError(400, `Invalid ${what}`);
-  return value;
-}
-
-function requireOwner() {
-  const owner = currentOwner();
-  if (!owner) throw new HttpError(409, 'No GitHub organization connected yet');
-  return owner;
-}
-
-async function getWorld(fresh = false) {
-  const owner = requireOwner();
-  return cached(`${provider.mode}:${owner}:world`, 120_000, () => provider.getWorld(owner), fresh);
-}
-
-function floorsFor(world) {
-  const settings = ownerSettings(world.owner.login);
-  const names = new Set(world.repos.map((r) => r.name));
-  if (settings.floors) return settings.floors.filter((n) => names.has(n));
-  return world.repos.filter((r) => !r.isArchived).slice(0, DEFAULT_FLOOR_COUNT).map((r) => r.name);
-}
-
-function statusPayload() {
-  const cfg = getConfig();
-  return {
-    mode: provider.mode,
-    forcedDemo: FORCE_DEMO,
-    chosenDemo: !!cfg.demo,
-    gh: { installed: gh.installed, authed: gh.authed, version: gh.version || null, user: gh.user || null, error: gh.error || null },
-    viewer: provider.viewer,
-    owner: currentOwner(),
-  };
-}
-
-// ---------------------------------------------------------------- API routes
-const routes = [];
-const route = (method, pattern, handler) => {
-  const keys = [];
-  const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), '([^/]+)')) + '$');
-  routes.push({ method, re, keys, handler });
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'same-origin',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  ...(HOSTED && PUBLIC_URL.protocol === 'https:' ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
 
-route('GET', '/api/status', async () => statusPayload());
-
-route('POST', '/api/recheck', async () => {
-  gh = await detectGh();
-  selectProvider();
-  return statusPayload();
-});
-
-// Owners always come from GitHub when gh is signed in, so you can leave demo mode from the browser.
-route('GET', '/api/owners', async () => (gh.authed && !FORCE_DEMO ? createGithubProvider(gh).listOwners() : provider.listOwners()));
-
-route('POST', '/api/connect', async ({ body }) => {
-  if (body.demo) {
-    setConnection({ owner: getConfig().owner, demo: true });
-  } else {
-    if (!gh.authed) throw new HttpError(409, 'GitHub CLI is not logged in. Run `gh auth login` first.');
-    setConnection({ owner: need(body.owner, OWNER_RE, 'organization'), demo: false });
-  }
-  selectProvider();
-  return statusPayload();
-});
-
-route('GET', '/api/world', async ({ query }) => {
-  const world = await getWorld(query.get('fresh') === '1');
-  const settings = ownerSettings(world.owner.login);
-  return {
-    mode: provider.mode,
-    viewer: provider.viewer,
-    owner: world.owner,
-    repos: world.repos,
-    memberCount: world.members ? world.members.length : null,
-    members: world.members ? world.members.map((m) => ({ login: m.login, name: m.name })) : null,
-    floors: floorsFor(world),
-    links: settings.links,
-  };
-});
-
-route('GET', '/api/floor/:repo', async ({ params, query }) => {
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const world = await getWorld();
-  const fresh = query.get('fresh') === '1';
-  return cached(`${provider.mode}:${world.owner.login}:floor:${repo}`, 30_000, () => provider.getFloor(world, repo), fresh);
-});
-
-route('GET', '/api/labels/:repo', async ({ params }) => {
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const owner = requireOwner();
-  return cached(`${provider.mode}:${owner}:labels:${repo}`, 300_000, () => provider.listLabels(owner, repo));
-});
-
-route('PUT', '/api/settings', async ({ body }) => {
-  const world = await getWorld();
-  const patch = {};
-  if (body.floors !== undefined) {
-    if (!Array.isArray(body.floors)) throw new HttpError(400, 'floors must be an array');
-    patch.floors = [...new Set(body.floors.map((f) => need(f, REPO_RE, 'repository name')))];
-  }
-  if (body.links !== undefined) {
-    if (!Array.isArray(body.links)) throw new HttpError(400, 'links must be an array');
-    patch.links = body.links.map((l) => ({
-      from: need(l.from, REPO_RE, 'repository name'),
-      to: need(l.to, REPO_RE, 'repository name'),
-      kind: String(l.kind || 'depends on').slice(0, 40),
-    }));
-  }
-  const settings = updateOwnerSettings(world.owner.login, patch);
-  return { floors: floorsFor(world), links: settings.links };
-});
-
-route('POST', '/api/repos', async ({ body }) => {
-  const world = await getWorld();
-  const name = need(body.name, REPO_RE, 'repository name');
-  const created = await provider.createRepo(world, {
-    name,
-    description: String(body.description || '').slice(0, 350),
-    isPrivate: body.isPrivate !== false,
-    autoInit: body.autoInit !== false,
-  });
-  // Give the new project a floor right away.
-  const floors = floorsFor(world);
-  updateOwnerSettings(world.owner.login, { floors: [...floors.filter((f) => f !== created.name), created.name] });
-  invalidate(`${provider.mode}:${world.owner.login}:world`);
-  return created;
-});
-
-route('POST', '/api/issues/:repo', async ({ params, body }) => {
-  const owner = requireOwner();
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const title = String(body.title || '').trim();
-  if (!title) throw new HttpError(400, 'An issue needs a title');
-  const assignees = (body.assignees || []).map((a) => need(a, LOGIN_RE, 'assignee'));
-  const labels = (body.labels || []).map((l) => String(l).slice(0, 50));
-  const created = await provider.createIssue(owner, repo, { title: title.slice(0, 256), body: String(body.body || ''), assignees, labels });
-  invalidate(`${provider.mode}:${owner}:floor:${repo}`);
-  invalidate(`${provider.mode}:${owner}:world`);
-  return created;
-});
-
-route('PATCH', '/api/issues/:repo/:number', async ({ params, body }) => {
-  const owner = requireOwner();
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const number = Number(params.number);
-  if (!Number.isInteger(number) || number < 1) throw new HttpError(400, 'Invalid issue number');
-  const patch = {};
-  if (body.assignees) patch.assignees = body.assignees.map((a) => need(a, LOGIN_RE, 'assignee'));
-  if (body.state) {
-    if (!['open', 'closed'].includes(body.state)) throw new HttpError(400, 'Invalid state');
-    patch.state = body.state;
-  }
-  const result = await provider.updateIssue(owner, repo, number, patch);
-  invalidate(`${provider.mode}:${owner}:floor:${repo}`);
-  invalidate(`${provider.mode}:${owner}:world`);
-  return result;
-});
-
-route('POST', '/api/prs/:repo/:number/merge', async ({ params, body }) => {
-  const owner = requireOwner();
-  const repo = need(params.repo, REPO_RE, 'repository name');
-  const number = Number(params.number);
-  if (!Number.isInteger(number) || number < 1) throw new HttpError(400, 'Invalid pull request number');
-  const method = ['merge', 'squash', 'rebase'].includes(body.method) ? body.method : 'squash';
-  const result = await provider.mergePR(owner, repo, number, method);
-  invalidate(`${provider.mode}:${owner}:floor:${repo}`);
-  invalidate(`${provider.mode}:${owner}:world`);
-  return result;
-});
-
-const avatarCache = new Map();
-async function avatarRoute(res, login) {
-  need(login, LOGIN_RE, 'login');
-  let entry = avatarCache.get(login);
-  if (!entry || Date.now() - entry.at > 6 * 3600_000) {
-    let img = null;
-    try {
-      img = await provider.avatar(login);
-    } catch {
-      img = null;
-    }
-    entry = { at: Date.now(), img };
-    if (avatarCache.size > 1000) avatarCache.clear();
-    avatarCache.set(login, entry);
-  }
-  if (!entry.img) return send(res, 404, 'no avatar');
-  res.writeHead(200, { 'Content-Type': entry.img.type, 'Cache-Control': 'max-age=3600' });
-  res.end(entry.img.buffer);
-}
-
-// ---------------------------------------------------------------- static files
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -292,84 +87,113 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-function serveStatic(res, baseDir, relPath) {
+function send(res, status, body) {
+  const isJson = typeof body === 'object';
+  res.writeHead(status, {
+    'Content-Type': isJson ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(isJson ? JSON.stringify(body) : body);
+}
+
+function serveStatic(res, baseDir, relPath, extraHeaders = {}) {
   const file = path.normalize(path.join(baseDir, relPath));
-  if (!file.startsWith(baseDir + path.sep) && file !== baseDir) return send(res, 403, 'forbidden');
+  if (!file.startsWith(baseDir + path.sep)) return send(res, 403, 'forbidden');
+  const type = MIME[path.extname(file).toLowerCase()];
+  if (!type) return send(res, 404, 'not found');
   fs.stat(file, (err, stat) => {
     if (err || !stat.isFile()) return send(res, 404, 'not found');
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', ...extraHeaders });
     fs.createReadStream(file).pipe(res);
   });
 }
 
-// ---------------------------------------------------------------- server
-const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer'];
 
-const server = http.createServer(async (req, res) => {
-  // Block DNS-rebinding and cross-site requests: this server holds the keys to your GitHub org.
-  if (!ALLOWED_HOSTS.has(req.headers.host)) return send(res, 403, 'forbidden host');
-  const url = new URL(req.url, `http://${req.headers.host}`);
+function endToEnd(headers) {
+  const out = { ...headers };
+  for (const h of HOP_BY_HOP) delete out[h];
+  return out;
+}
+
+const proxied = (pathname) => pathname.startsWith('/api/') || pathname.startsWith('/auth/') || pathname.startsWith('/stripe/');
+
+function proxy(req, res, url) {
+  const headers = endToEnd(req.headers);
+  const remote = req.socket.remoteAddress || 'unknown';
+  const xff = req.headers['x-forwarded-for'];
+  headers['x-forwarded-for'] = typeof xff === 'string' && xff ? `${xff}, ${remote}` : remote;
+  const upstream = http.request(
+    {
+      hostname: API.hostname.replace(/^\[|\]$/g, ''),
+      port: API.port || 80,
+      path: url.pathname + url.search,
+      method: req.method,
+      headers,
+    },
+    (up) => {
+      res.writeHead(up.statusCode, endToEnd(up.headers));
+      up.pipe(res);
+    },
+  );
+  upstream.setTimeout(60_000, () => upstream.destroy(new Error('timeout')));
+  upstream.on('error', (e) => {
+    if (res.headersSent) return res.destroy();
+    const reason = e.errors ? e.errors.map((x) => x.message).join(', ') : e.message || e.code;
+    console.error(`[proxy] ${req.method} ${url.pathname}: ${reason}`);
+    send(res, 503, { error: 'The Worktown3D API is not responding' });
+  });
+  res.on('close', () => {
+    if (!res.writableFinished) upstream.destroy();
+  });
+  req.pipe(upstream);
+}
+
+function handle(req, res) {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+  if (req.url === '/healthz') return send(res, 200, 'ok');
+  if (!ALLOWED_HOSTS.has(req.headers.host)) return send(res, 421, 'unknown host');
+  const url = new URL(req.url, 'http://placeholder');
   let pathname;
   try {
     pathname = decodeURIComponent(url.pathname);
   } catch {
     return send(res, 400, 'bad url');
   }
+  if (pathname.includes('\0')) return send(res, 400, 'bad url');
 
-  if (pathname.startsWith('/api/')) {
-    if (req.method !== 'GET') {
-      const origin = req.headers.origin;
-      if (req.headers['x-company3d'] !== '1' || (origin && !ALLOWED_HOSTS.has(origin.replace(/^https?:\/\//, '')))) {
-        return send(res, 403, { error: 'Cross-site request blocked' });
-      }
-    }
-    if (req.method === 'GET' && pathname.startsWith('/api/avatar/')) {
-      try {
-        return await avatarRoute(res, pathname.slice('/api/avatar/'.length));
-      } catch {
-        return send(res, 400, 'bad login');
-      }
-    }
-    for (const r of routes) {
-      if (r.method !== req.method) continue;
-      const m = pathname.match(r.re);
-      if (!m) continue;
-      const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
-      try {
-        const body = req.method === 'GET' ? {} : await readBody(req);
-        const result = await r.handler({ params, query: url.searchParams, body });
-        return send(res, 200, result ?? { ok: true });
-      } catch (e) {
-        const status = e.status && e.status >= 400 && e.status < 600 ? e.status : 500;
-        if (status >= 500) console.error(`[api] ${req.method} ${pathname}:`, e.message);
-        return send(res, status, { error: e.message || 'Something went wrong' });
-      }
-    }
-    return send(res, 404, { error: 'Unknown API route' });
-  }
+  if (proxied(pathname)) return proxy(req, res, url);
+  if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'method not allowed');
 
   if (pathname.startsWith('/vendor/three/')) {
     const rel = pathname.slice('/vendor/three/'.length);
     if (!rel.startsWith('build/') && !rel.startsWith('examples/jsm/')) return send(res, 404, 'not found');
     return serveStatic(res, THREE_DIR, rel);
   }
-  return serveStatic(res, PUBLIC, pathname === '/' ? 'index.html' : pathname);
+  if (pathname === '/' || pathname === '/index.html' || /^\/o\/[A-Za-z0-9-]{1,39}\/?$/.test(pathname)) {
+    return serveStatic(res, PUBLIC, 'index.html', { 'Content-Security-Policy': CSP });
+  }
+  return serveStatic(res, PUBLIC, pathname);
+}
+
+const server = http.createServer((req, res) => {
+  try {
+    handle(req, res);
+  } catch (e) {
+    console.error('[server]', e.message);
+    if (!res.headersSent) send(res, 500, 'internal error');
+    else res.destroy();
+  }
+});
+server.headersTimeout = 20_000;
+server.requestTimeout = 60_000;
+
+process.on('SIGTERM', () => {
+  server.close();
+  setTimeout(() => process.exit(0), 5000).unref();
 });
 
-gh = FORCE_DEMO ? gh : await detectGh();
-selectProvider();
-
 server.listen(PORT, HOST, () => {
-  const s = statusPayload();
-  console.log(`\n  🏢  Company3D is open at  http://localhost:${PORT}\n`);
-  if (s.mode === 'github') {
-    console.log(`  GitHub CLI ${s.gh.version} — signed in as @${s.gh.user.login}`);
-    console.log(s.owner ? `  Connected organization: ${s.owner}` : '  Pick an organization in the browser to get started.');
-  } else if (FORCE_DEMO) {
-    console.log('  Running in demo mode (--demo) with a fictional company.');
-  } else {
-    console.log(`  Demo mode: ${gh.error || 'demo selected in the manager office'}`);
-    if (!gh.installed) console.log('  Install the GitHub CLI (https://cli.github.com) and run `gh auth login` to use your real org.');
-  }
-  console.log('');
+  const where = HOSTED ? PUBLIC_URL.origin : `http://localhost:${PORT}`;
+  console.log(`\n  🏢  Worktown3D is open at  ${where}  (API: ${API.origin})\n`);
 });

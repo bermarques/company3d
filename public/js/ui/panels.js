@@ -5,6 +5,7 @@ import { hud } from './hud.js';
 import { api } from '../api.js';
 import { timeAgo } from '../engine/canvas.js';
 import { BOARD_COLUMNS, prBadges } from '../world/screens.js';
+import { can } from '../permissions.js';
 
 // ------------------------------------------------------------------ shared bits
 function badge(text, bg, fg = '#fff') {
@@ -91,13 +92,16 @@ export function openDevPanel(app, login) {
           h('section', null, h('h3', null, `Open pull requests (${prs.length})`), prs.length ? prs.map((p) => itemRow(p, 'pr')) : h('p', { class: 'muted' }, 'None')),
           h('section', null, h('h3', null, `Recently shipped (${shipped.length})`), shipped.length ? shipped.map((m) => itemRow(m, 'merged')) : h('p', { class: 'muted' }, 'None')),
         ),
-        h(
-          'div',
-          { class: 'manager-box' },
-          h('h3', null, '👔 Manager actions'),
-          h('div', { class: 'row' }, assignSelect, assignBtn),
-          h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => openIssueForm(app, { repo: data.repo.name, assignees: [login] }) }, `📝 Write a new issue for @${login}`)),
-        ),
+        // Only offer what this viewer's GitHub access allows (assigning needs triage; opening issues needs read).
+        can.triage(app, data.repo.name) || can.createIssue(app, data.repo.name)
+          ? h(
+              'div',
+              { class: 'manager-box' },
+              h('h3', null, '🛠️ Hand out work'),
+              can.triage(app, data.repo.name) ? h('div', { class: 'row' }, assignSelect, assignBtn) : null,
+              can.createIssue(app, data.repo.name) ? h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => openIssueForm(app, { repo: data.repo.name, assignees: [login] }) }, `📝 Write a new issue for @${login}`)) : null,
+            )
+          : null,
       );
     },
   });
@@ -129,7 +133,7 @@ export function openBoardPanel(app) {
       return h(
         'div',
         null,
-        h('div', { class: 'row space' }, h('h2', { class: 'board-title' }, `📋 ${repo} — Team Board`), h('div', { class: 'row' }, h('span', { class: 'muted' }, `updated ${timeAgo(data.fetchedAt)}`), refresh, h('button', { class: 'btn primary', onClick: () => openIssueForm(app, { repo }) }, '+ New issue'))),
+        h('div', { class: 'row space' }, h('h2', { class: 'board-title' }, `📋 ${repo} — Team Board`), h('div', { class: 'row' }, h('span', { class: 'muted' }, `updated ${timeAgo(data.fetchedAt)}`), refresh, can.createIssue(app, repo) ? h('button', { class: 'btn primary', onClick: () => openIssueForm(app, { repo }) }, '+ New issue') : null)),
         h('div', { class: 'kanban' }, columns),
       );
     },
@@ -155,7 +159,7 @@ function boardCard(app, repo, col, item, modal) {
   const people = item.assignees && item.assignees.length ? item.assignees : item.author ? [item.author] : [];
   const actions = [];
 
-  if (col.key === 'backlog' || col.key === 'inProgress') {
+  if ((col.key === 'backlog' || col.key === 'inProgress') && can.triage(app, repo)) {
     const sel = h('select', { class: 'small' }, h('option', { value: '' }, col.key === 'backlog' ? 'Assign to…' : 'Reassign to…'), devOptions(app));
     sel.addEventListener('change', async () => {
       if (!sel.value) return;
@@ -191,7 +195,7 @@ function boardCard(app, repo, col, item, modal) {
     );
     actions.push(close);
   }
-  if (col.key === 'ready') {
+  if (col.key === 'ready' && can.merge(app, repo)) {
     const method = h('select', { class: 'small' }, h('option', { value: 'squash' }, 'Squash'), h('option', { value: 'merge' }, 'Merge commit'), h('option', { value: 'rebase' }, 'Rebase'));
     const merge = h('button', { class: 'btn small success' }, '🚀 Merge');
     merge.addEventListener(
@@ -283,7 +287,7 @@ export function openRepoInfo(app) {
           data.devs.map((d) => h('button', { class: 'team-chip', onClick: () => openDevPanel(app, d.login) }, avatarEl(d.login, 36), h('span', null, h('strong', null, d.name || d.login), h('small', null, d.status === 'working' ? '🔨 working' : '💤 idle')))),
         ),
         data.departedCount ? h('p', { class: 'muted' }, `${data.departedCount} past contributor${data.departedCount > 1 ? 's are' : ' is'} no longer in the organization and not shown.`) : null,
-        h('div', { class: 'row end' }, h('button', { class: 'btn', onClick: () => openBoardPanel(app) }, '📋 Open the board'), h('button', { class: 'btn primary', onClick: () => openIssueForm(app, { repo: repo.name }) }, '+ New issue')),
+        h('div', { class: 'row end' }, h('button', { class: 'btn', onClick: () => openBoardPanel(app) }, '📋 Open the board'), can.createIssue(app, repo.name) ? h('button', { class: 'btn primary', onClick: () => openIssueForm(app, { repo: repo.name }) }, '+ New issue') : null),
       );
     },
   });
@@ -292,8 +296,13 @@ export function openRepoInfo(app) {
 
 // ------------------------------------------------------------------ new issue
 export function openIssueForm(app, { repo, assignees = [] } = {}) {
-  const repos = app.world.repos.filter((r) => !r.isArchived).map((r) => r.name);
-  const state = { repo: repo || app.currentRepo() || app.world.floors[0] || repos[0], labels: null, team: null };
+  const repos = app.world.repos.filter((r) => !r.isArchived && can.createIssue(app, r.name)).map((r) => r.name);
+  const preferred = [repo, app.currentRepo(), ...app.world.floors].find((r) => r && repos.includes(r));
+  const state = { repo: preferred || repos[0], labels: null, team: null };
+  if (!repos.length) {
+    hud.toast("You can't open issues in any repository here", 'warn');
+    return;
+  }
 
   openModal({
     title: 'New issue',
@@ -312,6 +321,13 @@ export function openIssueForm(app, { repo, assignees = [] } = {}) {
         state.repo = r;
         peopleBox.replaceChildren(h('span', { class: 'muted' }, 'Loading people…'));
         labelBox.replaceChildren(h('span', { class: 'muted' }, 'Loading labels…'));
+        if (!can.triage(app, r)) {
+          // GitHub silently drops assignees/labels from people without triage access, so don't pretend.
+          const note = () => h('span', { class: 'muted' }, 'Needs triage access to this repo');
+          peopleBox.replaceChildren(note());
+          labelBox.replaceChildren(note());
+          return;
+        }
         const [team, labels] = await Promise.all([app.teamFor(r).catch(() => []), api.labels(r).catch(() => [])]);
         if (repoSel.value !== r) return;
         peopleBox.replaceChildren(
